@@ -1,0 +1,13 @@
+﻿.venv/
+__pycache__/
+.pytest_cache/
+.env
+*.pyc
+*.pyo
+docs/env.local
+Home.md
+data/lumen.db
+/data/knowledge/*
+!/data/knowledge/.gitkeep
+/data/memory/*
+!/data/memory/.gitkeep
