@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 import sys
 from typing import get_args
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 # If this file is started directly from an IDE, add `src` to imports.
 if __package__ in (None, ""):
@@ -20,6 +21,8 @@ from lumen.storage.db import Database
 
 # The app is assembled once at startup and reused by every request.
 app = FastAPI(title="Lumen Learning API", version="0.1.0")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("lumen")
 # Settings define the DB path, Ollama URL, model name, and server host/port.
 settings = Settings()
 # SQLite database used for conversation history and long-term memory facts.
@@ -40,6 +43,14 @@ conversation_id = "lumen-conversation"
 user_id = "lumen-user"
 
 ALLOWED_PREDICATES = set(get_args(MemoryPredicate))
+
+
+@app.middleware("http")
+async def log_chat_requests(request: Request, call_next):
+    if request.method == "POST" and request.url.path == "/chat":
+        body = await request.body()
+        logger.info("Incoming /chat body: %s", body.decode("utf-8", errors="replace"))
+    return await call_next(request)
 
 
 # Build a stable per-user context namespace so different users do not share memory.
@@ -127,7 +138,9 @@ def _normalize_memory_facts(raw_facts: object, user_id: str) -> list[dict[str, o
 # Persist the validated facts into the long-term memory table.
 def _store_memory_facts(facts: list[dict[str, object]], source_ref: str, user_id: str) -> None:
     for fact in facts:
-        memory_store.add_fact(user_id=user_id, source_ref=source_ref, **fact)
+        fact_copy = dict(fact)
+        fact_user_id = str(fact_copy.pop("user_id", user_id)).strip() or user_id
+        memory_store.add_fact(user_id=fact_user_id, source_ref=source_ref, **fact_copy)
 
 
 # Render facts into a compact prompt block for retrieval context.

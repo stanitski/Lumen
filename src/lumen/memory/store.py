@@ -120,7 +120,7 @@ class MemoryStore:
                     conversation_id, user_id, source, question, answer,
                     question_created_at, answer_created_at, created_at, memory_processed
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     conversation_id,
@@ -456,7 +456,7 @@ class MemoryStore:
         params: list[object] = [user_id]
         if source_types:
             placeholders = ", ".join("?" for _ in source_types)
-            sql += f" WHERE source_type IN ({placeholders})"
+            sql += f" AND source_type IN ({placeholders})"
             params.extend(source_types)
         sql += " ORDER BY importance DESC, last_seen DESC, id DESC"
 
