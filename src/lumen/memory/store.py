@@ -6,7 +6,7 @@ import math
 import re
 from datetime import datetime, timedelta, timezone
 
-from lumen.models import ConversationTurnRecord, EmbeddingHit, MemoryHit
+from lumen.models import ConversationTurnRecord, EmbeddingHit, MemoryHit, ReminderRecord
 
 
 class MemoryStore:
@@ -96,6 +96,18 @@ class MemoryStore:
             )
             connection.commit()
             return int(cursor.lastrowid)
+
+    def delete_embeddings(self, *, user_id: str, source_type: str, source_ref: str) -> int:
+        with self._session_factory() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM memory_embeddings
+                WHERE user_id = ? AND source_type = ? AND source_ref = ?
+                """,
+                (user_id, source_type, source_ref),
+            )
+            connection.commit()
+            return int(cursor.rowcount)
 
     def add_turn(
         self,
@@ -438,6 +450,127 @@ class MemoryStore:
             connection.commit()
             return cursor.rowcount > 0
 
+    def add_reminder(
+        self,
+        *,
+        user_id: str,
+        source_ref: str,
+        text: str,
+        due_at: str,
+        conversation_id: str | None = None,
+        repeat_interval_seconds: int | None = None,
+        repeat_until: str | None = None,
+        status: str = "pending",
+        created_at: str | None = None,
+        sent_at: str | None = None,
+    ) -> int:
+        created_at = created_at or datetime.now(timezone.utc).isoformat()
+        with self._session_factory() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO reminders(
+                    user_id, conversation_id, source_ref, text, due_at, status, created_at, sent_at,
+                    repeat_interval_seconds, repeat_until
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    conversation_id,
+                    source_ref,
+                    text,
+                    due_at,
+                    status,
+                    created_at,
+                    sent_at,
+                    repeat_interval_seconds,
+                    repeat_until,
+                ),
+            )
+            connection.commit()
+            return int(cursor.lastrowid)
+
+    def list_reminders(
+        self,
+        user_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[ReminderRecord]:
+        safe_limit = max(1, min(limit, 500))
+        params: list[object] = [user_id]
+        sql = """
+            SELECT id, user_id, conversation_id, source_ref, text, due_at, status, created_at, sent_at,
+                   repeat_interval_seconds, repeat_until, metadata_json
+            FROM reminders
+            WHERE user_id = ?
+        """
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY due_at ASC, id ASC LIMIT ?"
+        params.append(safe_limit)
+        with self._session_factory() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [self._row_to_reminder(row) for row in rows]
+
+    def due_reminders(self, *, limit: int = 100, now: datetime | None = None) -> list[ReminderRecord]:
+        safe_limit = max(1, min(limit, 500))
+        cutoff = (now or datetime.now(timezone.utc)).isoformat()
+        with self._session_factory() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, user_id, conversation_id, source_ref, text, due_at, status, created_at, sent_at,
+                       repeat_interval_seconds, repeat_until, metadata_json
+                FROM reminders
+                WHERE status = ? AND due_at <= ?
+                ORDER BY due_at ASC, id ASC
+                LIMIT ?
+                """,
+                ("pending", cutoff, safe_limit),
+            ).fetchall()
+        return [self._row_to_reminder(row) for row in rows]
+
+    def mark_reminder_sent(self, reminder_id: int, *, user_id: str, sent_at: str | None = None) -> dict | None:
+        sent_at = sent_at or datetime.now(timezone.utc).isoformat()
+        with self._session_factory() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE reminders
+                SET status = ?, sent_at = ?
+                WHERE user_id = ? AND id = ?
+                """,
+                ("sent", sent_at, user_id, reminder_id),
+            )
+            connection.commit()
+            if cursor.rowcount == 0:
+                return None
+            row = connection.execute(
+                """
+                SELECT id, user_id, conversation_id, source_ref, text, due_at, status, created_at, sent_at,
+                       repeat_interval_seconds, repeat_until, metadata_json
+                FROM reminders
+                WHERE user_id = ? AND id = ?
+                """,
+                (user_id, reminder_id),
+            ).fetchone()
+        return self._row_to_reminder_dict(row) if row else None
+
+    def cancel_reminder(self, reminder_id: int, *, user_id: str) -> bool:
+        with self._session_factory() as connection:
+            cursor = connection.execute(
+                "UPDATE reminders SET status = ? WHERE user_id = ? AND id = ?",
+                ("cancelled", user_id, reminder_id),
+            )
+            connection.commit()
+            return cursor.rowcount > 0
+
+    def delete_reminder(self, reminder_id: int, *, user_id: str) -> bool:
+        with self._session_factory() as connection:
+            cursor = connection.execute("DELETE FROM reminders WHERE user_id = ? AND id = ?", (user_id, reminder_id))
+            connection.commit()
+            return cursor.rowcount > 0
+
     def search_embeddings(
         self,
         query_embedding: list[float],
@@ -502,6 +635,27 @@ class MemoryStore:
             "expires_at": row["expires_at"],
             "tags": json.loads(row["tags_json"] or "[]"),
         }
+
+    def _row_to_reminder(self, row) -> ReminderRecord:
+        return ReminderRecord(
+            id=int(row["id"]),
+            user_id=row["user_id"],
+            conversation_id=row["conversation_id"],
+            source_ref=row["source_ref"],
+            text=row["text"],
+            due_at=row["due_at"],
+            status=row["status"],
+            created_at=row["created_at"],
+            sent_at=row["sent_at"],
+            repeat_interval_seconds=(
+                int(row["repeat_interval_seconds"]) if row["repeat_interval_seconds"] is not None else None
+            ),
+            repeat_until=row["repeat_until"],
+        )
+
+    def _row_to_reminder_dict(self, row) -> dict:
+        reminder = self._row_to_reminder(row)
+        return reminder.model_dump()
 
     @staticmethod
     def _load_embedding_vector(raw_json: str) -> list[float]:

@@ -58,6 +58,24 @@ CREATE TABLE IF NOT EXISTS memory_embeddings (
     last_seen TEXT NOT NULL,
     UNIQUE(source_type, source_ref, chunk_index)
 );
+
+CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    conversation_id TEXT NULL,
+    source_ref TEXT NOT NULL,
+    text TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    sent_at TEXT NULL,
+    repeat_interval_seconds INTEGER NULL,
+    repeat_until TEXT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_reminders_status_due_at
+ON reminders(status, due_at);
 """
 
 LEGACY_TABLES = (
@@ -68,7 +86,7 @@ LEGACY_TABLES = (
     "conversation_logs",
 )
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 8
 
 
 class Database:
@@ -82,6 +100,7 @@ class Database:
             connection.executescript(SCHEMA)
             self._migrate_conversation_turns_without_session_id(connection)
             self._migrate_long_term_memory_user_id(connection)
+            self._migrate_reminders_repeat_columns(connection)
             for table_name in LEGACY_TABLES:
                 connection.execute(f"DROP TABLE IF EXISTS {table_name}")
 
@@ -142,6 +161,16 @@ class Database:
             if "user_id" in column_names:
                 continue
             connection.execute(f"ALTER TABLE {table_name} ADD COLUMN user_id TEXT NOT NULL DEFAULT 'lumen-user'")
+
+    def _migrate_reminders_repeat_columns(self, connection) -> None:
+        columns = connection.execute("PRAGMA table_info(reminders)").fetchall()
+        if not columns:
+            return
+        column_names = {str(row["name"]) for row in columns}
+        if "repeat_interval_seconds" not in column_names:
+            connection.execute("ALTER TABLE reminders ADD COLUMN repeat_interval_seconds INTEGER NULL")
+        if "repeat_until" not in column_names:
+            connection.execute("ALTER TABLE reminders ADD COLUMN repeat_until TEXT NULL")
 
     @contextmanager
     def session(self):

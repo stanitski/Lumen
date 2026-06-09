@@ -30,6 +30,10 @@ MemoryPredicate = Literal[
     "preferred_name",
 ]
 
+KnowledgeUploadKind = Literal["text", "pdf", "image", "video", "unsupported"]
+KnowledgeUploadStatus = Literal["indexed", "pending", "unsupported"]
+ReminderStatus = Literal["pending", "sent", "cancelled", "failed"]
+
 
 class MemoryHit(BaseModel):
     id: int
@@ -94,3 +98,52 @@ class ChatResponse(BaseModel):
 class SleepResult(BaseModel):
     processed_turns: int
     deleted_turns: int
+
+
+class TelegramSendRequest(BaseModel):
+    chat_id: int | str
+    message: str
+    parse_mode: str | None = None
+
+
+class TelegramSendResult(BaseModel):
+    ok: bool
+    status_code: int
+    response: dict[str, object] = Field(default_factory=dict)
+    message: str = ""
+
+
+class KnowledgeUploadResult(BaseModel):
+    status: KnowledgeUploadStatus
+    kind: KnowledgeUploadKind
+    user_id: str
+    filename: str
+    content_type: str
+    source_ref: str
+    chunks_created: int = 0
+    embeddings_created: int = 0
+    message: str
+
+
+class ReminderRecord(BaseModel):
+    id: int
+    user_id: str
+    conversation_id: str | None = None
+    source_ref: str
+    text: str
+    due_at: str
+    status: ReminderStatus
+    created_at: str
+    sent_at: str | None = None
+    repeat_interval_seconds: int | None = None
+    repeat_until: str | None = None
+
+
+class ReminderRequest(BaseModel):
+    user_id: str
+    conversation_id: str | None = None
+    source_ref: str
+    text: str
+    due_at: str
+    repeat_interval_seconds: int | None = Field(default=None, ge=1)
+    repeat_until: str | None = None

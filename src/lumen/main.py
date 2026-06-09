@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 import sys
 from typing import get_args
 
-from fastapi import FastAPI, Request
+import httpx
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 
 # If this file is started directly from an IDE, add `src` to imports.
 if __package__ in (None, ""):
@@ -15,7 +17,16 @@ if __package__ in (None, ""):
 from lumen.config import Settings
 from lumen.connectors.ollama import OllamaConnector
 from lumen.memory.store import MemoryStore
-from lumen.models import ChatRequest, ChatResponse, MemoryFact, MemoryPredicate, SleepResult
+from lumen.models import (
+    ChatRequest,
+    ChatResponse,
+    KnowledgeUploadResult,
+    MemoryFact,
+    MemoryPredicate,
+    SleepResult,
+    TelegramSendRequest,
+    TelegramSendResult,
+)
 from lumen.storage.db import Database
 
 
@@ -38,11 +49,26 @@ ollama = OllamaConnector(
     keep_alive=settings.ollama_keep_alive,
 )
 
-# For now this demo uses one fixed conversation/user identity.
 conversation_id = "lumen-conversation"
 user_id = "lumen-user"
 
 ALLOWED_PREDICATES = set(get_args(MemoryPredicate))
+TEXT_KNOWLEDGE_EXTENSIONS = {
+    ".csv",
+    ".htm",
+    ".html",
+    ".ini",
+    ".json",
+    ".log",
+    ".md",
+    ".markdown",
+    ".rst",
+    ".toml",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
 
 
 @app.middleware("http")
@@ -172,6 +198,226 @@ def _format_embedding_hits_for_prompt(hits) -> str:
     return "Relevant long-term dialogue memories:\n" + "\n".join(lines)
 
 
+def _format_knowledge_hits_for_prompt(hits) -> str:
+    if not hits:
+        return "No relevant knowledge documents were found."
+    lines = [
+        f"- score={hit.similarity:.3f}, source={hit.source_ref}, chunk={hit.chunk_index}, importance={hit.importance}\n"
+        f"  {hit.content}"
+        for hit in hits
+    ]
+    return "Relevant knowledge documents:\n" + "\n".join(lines)
+
+
+def _normalize_source_ref(value: str | None, fallback: str) -> str:
+    candidate = (value or fallback).strip()
+    candidate = re.sub(r"[^\w.\-:]+", "_", candidate, flags=re.UNICODE)
+    candidate = candidate.strip("._-:")
+    return candidate or fallback
+
+
+def _infer_knowledge_kind(filename: str | None, content_type: str | None) -> str:
+    safe_filename = (filename or "").strip().lower()
+    safe_content_type = (content_type or "").strip().lower()
+    suffix = Path(safe_filename).suffix.lower()
+    if safe_content_type.startswith("text/") or suffix in TEXT_KNOWLEDGE_EXTENSIONS:
+        return "text"
+    if safe_content_type == "application/pdf" or suffix == ".pdf":
+        return "pdf"
+    if safe_content_type.startswith("image/") or suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"}:
+        return "image"
+    if safe_content_type.startswith("video/") or suffix in {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}:
+        return "video"
+    return "unsupported"
+
+
+def _decode_upload_bytes(raw: bytes) -> str:
+    for encoding in ("utf-8-sig", "utf-8", "cp1251", "cp866", "latin-1"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _chunk_text(text: str, max_chunk_chars: int = 8000) -> list[str]:
+    normalized = re.sub(r"\r\n?", "\n", text).strip()
+    if not normalized:
+        return []
+
+    max_chunk_chars = max(500, int(max_chunk_chars))
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", normalized) if part.strip()]
+    chunks: list[str] = []
+    current = ""
+
+    def flush_current() -> None:
+        nonlocal current
+        chunk = current.strip()
+        if chunk:
+            chunks.append(chunk)
+        current = ""
+
+    for paragraph in paragraphs:
+        if len(paragraph) > max_chunk_chars:
+            flush_current()
+            start = 0
+            while start < len(paragraph):
+                end = min(len(paragraph), start + max_chunk_chars)
+                piece = paragraph[start:end].strip()
+                if piece:
+                    chunks.append(piece)
+                if end >= len(paragraph):
+                    break
+                start = end
+            continue
+
+        candidate = f"{current}\n\n{paragraph}".strip() if current else paragraph
+        if current and len(candidate) > max_chunk_chars:
+            flush_current()
+            current = paragraph
+        else:
+            current = candidate
+
+    flush_current()
+    return chunks
+
+
+async def _index_text_knowledge(
+    *,
+    file: UploadFile,
+    ingest_user_id: str,
+    source_ref: str,
+    max_chunk_chars: int,
+) -> KnowledgeUploadResult:
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    text = _decode_upload_bytes(raw)
+    chunks = _chunk_text(text, max_chunk_chars=max_chunk_chars)
+    if not chunks:
+        raise HTTPException(status_code=400, detail="No indexable text was found in the uploaded file.")
+
+    deleted_embeddings = memory_store.delete_embeddings(
+        user_id=ingest_user_id,
+        source_type="knowledge_text",
+        source_ref=source_ref,
+    )
+
+    embedding_payload = await ollama.embed(input=chunks, model=settings.ollama_embedding_model)
+    embeddings = embedding_payload.get("embeddings")
+    if not isinstance(embeddings, list) or len(embeddings) != len(chunks):
+        raise RuntimeError("Ollama returned an unexpected embeddings payload")
+
+    embeddings_created = 0
+    safe_filename = file.filename or "upload"
+    for chunk_index, (chunk, vector) in enumerate(zip(chunks, embeddings)):
+        if not isinstance(vector, list) or not vector:
+            raise RuntimeError(f"Invalid embedding vector for chunk {chunk_index}")
+        memory_store.add_embedding(
+            user_id=ingest_user_id,
+            source_type="knowledge_text",
+            source_ref=source_ref,
+            chunk_index=chunk_index,
+            role=None,
+            content=chunk,
+            embedding=[float(value) for value in vector],
+            embedding_model=settings.ollama_embedding_model,
+            importance=6,
+            metadata={
+                "kind": "text",
+                "filename": safe_filename,
+                "content_type": file.content_type,
+                "source_ref": source_ref,
+                "chunk_index": chunk_index,
+                "chunk_count": len(chunks),
+                "max_chunk_chars": max_chunk_chars,
+            },
+        )
+        embeddings_created += 1
+
+    return KnowledgeUploadResult(
+        status="indexed",
+        kind="text",
+        user_id=ingest_user_id,
+        filename=safe_filename,
+        content_type=file.content_type or "application/octet-stream",
+        source_ref=source_ref,
+        chunks_created=len(chunks),
+        embeddings_created=embeddings_created,
+        message=(
+            f"Text file indexed into long-term memory. Replaced {deleted_embeddings} existing embeddings."
+        ),
+    )
+
+
+def _pending_knowledge_response(
+    *,
+    kind: str,
+    ingest_user_id: str,
+    filename: str,
+    content_type: str,
+    source_ref: str,
+) -> KnowledgeUploadResult:
+    messages = {
+        "pdf": "PDF upload received, but PDF text extraction is not implemented yet.",
+        "image": "Image upload received, but OCR / vision extraction is not implemented yet.",
+        "video": "Video upload received, but video frame/audio extraction is not implemented yet.",
+    }
+    return KnowledgeUploadResult(
+        status="pending",
+        kind=kind,  # type: ignore[arg-type]
+        user_id=ingest_user_id,
+        filename=filename,
+        content_type=content_type,
+        source_ref=source_ref,
+        chunks_created=0,
+        embeddings_created=0,
+        message=messages.get(kind, "Knowledge ingestion is pending for this file type."),
+    )
+
+
+async def _send_telegram_message(payload: TelegramSendRequest) -> TelegramSendResult:
+    if not settings.home_assistant_token.strip():
+        raise HTTPException(status_code=503, detail="Home Assistant token is not configured.")
+
+    service_url = settings.home_assistant_url.rstrip("/") + "/api/services/telegram_bot/send_message"
+    headers = {
+        "Authorization": f"Bearer {settings.home_assistant_token.strip()}",
+        "Content-Type": "application/json",
+    }
+    body: dict[str, object] = {
+        "chat_id": payload.chat_id,
+        "message": payload.message,
+    }
+    if payload.parse_mode:
+        body["parse_mode"] = payload.parse_mode
+
+    async with httpx.AsyncClient(timeout=settings.ollama_timeout_seconds) as client:
+        response = await client.post(service_url, headers=headers, json=body)
+
+    try:
+        response_body = response.json()
+    except json.JSONDecodeError:
+        response_body = {"raw": response.text}
+
+    if response.is_success:
+        return TelegramSendResult(
+            ok=True,
+            status_code=response.status_code,
+            response=response_body if isinstance(response_body, dict) else {"raw": response.text},
+            message="Telegram message sent through Home Assistant.",
+        )
+
+    raise HTTPException(
+        status_code=response.status_code,
+        detail={
+            "message": "Home Assistant rejected the Telegram send request.",
+            "response": response_body,
+        },
+    )
+
+
 # Build the prompt, call Ollama once, and expect both an answer and memory facts.
 async def _answer_with_memory(payload_text: str, conversation_scope_id: str, user_id: str) -> ChatResponse:
     recent_turns = memory_store.recent_turns(conversation_scope_id, limit=50, hours=24)
@@ -188,6 +434,12 @@ async def _answer_with_memory(payload_text: str, conversation_scope_id: str, use
         user_id=user_id,
         limit=5,
         source_types=["dialogue_turn"],
+    )
+    relevant_knowledge = memory_store.search_embeddings(
+        [float(value) for value in query_vector],
+        user_id=user_id,
+        limit=5,
+        source_types=["knowledge_text"],
     )
     messages = [
         {
@@ -217,6 +469,9 @@ async def _answer_with_memory(payload_text: str, conversation_scope_id: str, use
                 "Use predicate='is' for identity-style facts, like names or descriptions, when appropriate.\n"
                 "confidence must be a number from 0.0 to 1.0, where 0.0 means a guess and 1.0 means very sure.\n"
                 "importance must be an integer from 1 to 10, where 10 is most important.\n"
+                "Return answer as plain text only.\n"
+                "Do not use Markdown, HTML, headings, bullets, code fences, or decorative formatting in the answer.\n"
+                "Keep the answer concise and natural.\n"
                 "Do not include markdown fences or explanations."
             ),
         },
@@ -227,6 +482,10 @@ async def _answer_with_memory(payload_text: str, conversation_scope_id: str, use
         {
             "role": "system",
             "content": _format_embedding_hits_for_prompt(relevant_turns),
+        },
+        {
+            "role": "system",
+            "content": _format_knowledge_hits_for_prompt(relevant_knowledge),
         },
         {
             "role": "system",
@@ -321,6 +580,52 @@ async def chat(payload: ChatRequest) -> ChatResponse:
 @app.post("/sleep", response_model=SleepResult)
 async def sleep() -> SleepResult:
     return await _sleep_memory(hours=24)
+
+
+# Upload a knowledge file, index text immediately, and leave non-text stubs explicit.
+@app.post("/knowledge/upload", response_model=KnowledgeUploadResult)
+async def upload_knowledge(
+    file: UploadFile = File(...),
+    ingest_user_id: str = Form(default=user_id),
+    source_ref: str | None = Form(default=None),
+    max_chunk_chars: int = Form(default=8000),
+) -> KnowledgeUploadResult:
+    effective_user_id = (ingest_user_id or user_id).strip() or user_id
+    effective_source_ref = _normalize_source_ref(source_ref, file.filename or "knowledge-upload")
+    kind = _infer_knowledge_kind(file.filename, file.content_type)
+
+    if kind == "text":
+        return await _index_text_knowledge(
+            file=file,
+            ingest_user_id=effective_user_id,
+            source_ref=effective_source_ref,
+            max_chunk_chars=max_chunk_chars,
+        )
+    if kind in {"pdf", "image", "video"}:
+        return _pending_knowledge_response(
+            kind=kind,
+            ingest_user_id=effective_user_id,
+            filename=file.filename or "upload",
+            content_type=file.content_type or "application/octet-stream",
+            source_ref=effective_source_ref,
+        )
+    return KnowledgeUploadResult(
+        status="unsupported",
+        kind="unsupported",
+        user_id=effective_user_id,
+        filename=file.filename or "upload",
+        content_type=file.content_type or "application/octet-stream",
+        source_ref=effective_source_ref,
+        chunks_created=0,
+        embeddings_created=0,
+        message="Unsupported file type for knowledge ingestion.",
+    )
+
+
+# Send a Telegram message through Home Assistant directly.
+@app.post("/telegram/send", response_model=TelegramSendResult)
+async def telegram_send(payload: TelegramSendRequest) -> TelegramSendResult:
+    return await _send_telegram_message(payload)
 
 
 # Direct execution path for IDE debugging.
