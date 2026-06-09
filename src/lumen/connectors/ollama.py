@@ -29,6 +29,26 @@ class OllamaConnector:
             response.raise_for_status()
             return response.json()
 
+    async def embed(
+        self,
+        input: str | list[str],
+        model: str | None = None,
+        *,
+        truncate: bool = True,
+        dimensions: int | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": model or self.model,
+            "input": input,
+            "truncate": truncate,
+        }
+        if dimensions is not None:
+            payload["dimensions"] = dimensions
+        async with httpx.AsyncClient(base_url=self.base_url.rstrip("/"), timeout=self.timeout_seconds) as client:
+            response = await client.post("/api/embed", json=payload)
+            response.raise_for_status()
+            return response.json()
+
     async def healthcheck(self) -> bool:
         if not self.available:
             return False

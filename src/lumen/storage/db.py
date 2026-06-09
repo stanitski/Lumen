@@ -11,19 +11,22 @@ CREATE TABLE IF NOT EXISTS schema_version (
     applied_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS conversation_logs (
+CREATE TABLE IF NOT EXISTS conversation_turns (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     conversation_id TEXT NOT NULL,
-    session_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
     source TEXT NOT NULL,
-    role TEXT NOT NULL,
-    message TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    question_created_at TEXT NOT NULL,
+    answer_created_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    memory_processed INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS memory_facts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
     category TEXT NOT NULL,
     subject TEXT NOT NULL,
     predicate TEXT NOT NULL,
@@ -36,53 +39,36 @@ CREATE TABLE IF NOT EXISTS memory_facts (
     tags_json TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS action_traces (
+CREATE TABLE IF NOT EXISTS memory_embeddings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    action_id TEXT NOT NULL UNIQUE,
-    conversation_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
-    label TEXT NOT NULL,
-    ha_domain TEXT NOT NULL,
-    ha_service TEXT NOT NULL,
-    service_data_json TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    risk_level TEXT NOT NULL,
-    status TEXT NOT NULL,
-    result_message TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    confirmed_at TEXT NULL,
-    executed_at TEXT NULL
-);
-
-CREATE TABLE IF NOT EXISTS knowledge_documents (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_type TEXT NOT NULL,
-    source_ref TEXT NOT NULL UNIQUE,
-    title TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL DEFAULT 0,
+    role TEXT NULL,
     content TEXT NOT NULL,
-    extra_metadata_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    embedding_model TEXT NOT NULL,
+    embedding_dimensions INTEGER NOT NULL,
+    embedding_json TEXT NOT NULL,
+    importance INTEGER NOT NULL DEFAULT 5,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS knowledge_chunks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    document_id INTEGER NOT NULL,
-    chunk_index INTEGER NOT NULL,
-    content TEXT NOT NULL,
-    search_text TEXT NOT NULL,
-    FOREIGN KEY(document_id) REFERENCES knowledge_documents(id)
-);
-
-CREATE TABLE IF NOT EXISTS ingestion_runs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_path TEXT NOT NULL,
-    status TEXT NOT NULL,
-    documents_indexed INTEGER NOT NULL,
-    message TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    UNIQUE(source_type, source_ref, chunk_index)
 );
 """
+
+LEGACY_TABLES = (
+    "action_traces",
+    "knowledge_documents",
+    "knowledge_chunks",
+    "ingestion_runs",
+    "conversation_logs",
+)
+
+CURRENT_SCHEMA_VERSION = 6
 
 
 class Database:
@@ -94,13 +80,68 @@ class Database:
     def init(self) -> None:
         with self.session() as connection:
             connection.executescript(SCHEMA)
-            cursor = connection.execute("SELECT version FROM schema_version WHERE version = 1")
-            if cursor.fetchone() is None:
+            self._migrate_conversation_turns_without_session_id(connection)
+            self._migrate_long_term_memory_user_id(connection)
+            for table_name in LEGACY_TABLES:
+                connection.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+            cursor = connection.execute("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1")
+            row = cursor.fetchone()
+            if row is None or int(row["version"]) < CURRENT_SCHEMA_VERSION:
+                connection.execute("DELETE FROM schema_version")
                 connection.execute(
                     "INSERT INTO schema_version(version, applied_at) VALUES (?, datetime('now'))",
-                    (1,),
+                    (CURRENT_SCHEMA_VERSION,),
                 )
             connection.commit()
+
+    def _migrate_conversation_turns_without_session_id(self, connection) -> None:
+        columns = connection.execute("PRAGMA table_info(conversation_turns)").fetchall()
+        if not columns:
+            return
+        column_names = {str(row["name"]) for row in columns}
+        if "session_id" not in column_names:
+            return
+        connection.execute("ALTER TABLE conversation_turns RENAME TO conversation_turns_legacy")
+        connection.execute(
+            """
+            CREATE TABLE conversation_turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                question TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                question_created_at TEXT NOT NULL,
+                answer_created_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                memory_processed INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO conversation_turns (
+                id, conversation_id, user_id, source, question, answer,
+                question_created_at, answer_created_at, created_at, memory_processed
+            )
+            SELECT
+                id, conversation_id, user_id, source, question, answer,
+                question_created_at, answer_created_at, created_at, memory_processed
+            FROM conversation_turns_legacy
+            """
+        )
+        connection.execute("DROP TABLE conversation_turns_legacy")
+
+    def _migrate_long_term_memory_user_id(self, connection) -> None:
+        for table_name in ("memory_facts", "memory_embeddings"):
+            columns = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+            if not columns:
+                continue
+            column_names = {str(row["name"]) for row in columns}
+            if "user_id" in column_names:
+                continue
+            connection.execute(f"ALTER TABLE {table_name} ADD COLUMN user_id TEXT NOT NULL DEFAULT 'lumen-user'")
 
     @contextmanager
     def session(self):
