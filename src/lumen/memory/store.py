@@ -6,12 +6,19 @@ import math
 import re
 from datetime import datetime, timedelta, timezone
 
+from lumen.time_utils import local_now_iso
+
 from lumen.models import ConversationTurnRecord, EmbeddingHit, MemoryHit, ReminderRecord
 
 
 class MemoryStore:
     def __init__(self, session_factory) -> None:
         self._session_factory = session_factory
+
+    @staticmethod
+    def _scope_user_ids(user_id: str) -> tuple[str, str]:
+        effective_user_id = (user_id or "").strip() or "lumen-user"
+        return effective_user_id, "global"
 
     def add_embedding(
         self,
@@ -27,7 +34,7 @@ class MemoryStore:
         importance: int = 5,
         metadata: dict[str, object] | None = None,
     ) -> int:
-        now = datetime.now(timezone.utc).isoformat()
+        now = local_now_iso()
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
         metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
         embedding_json = json.dumps([float(value) for value in embedding], ensure_ascii=False)
@@ -122,7 +129,7 @@ class MemoryStore:
         created_at: str | None = None,
         memory_processed: int = 0,
     ) -> int:
-        question_created_at = question_created_at or datetime.now(timezone.utc).isoformat()
+        question_created_at = question_created_at or local_now_iso()
         answer_created_at = answer_created_at or question_created_at
         created_at = created_at or answer_created_at
         with self._session_factory() as connection:
@@ -163,7 +170,7 @@ class MemoryStore:
         tags: list[str] | None = None,
         expires_at: datetime | None = None,
     ) -> int:
-        now = datetime.now(timezone.utc).isoformat()
+        now = local_now_iso()
         with self._session_factory() as connection:
             existing = connection.execute(
                 """
@@ -223,12 +230,13 @@ class MemoryStore:
     def search(self, query: str, user_id: str, limit: int = 10) -> list[MemoryHit]:
         tokens = [token.strip().lower() for token in re.split(r"\W+", query) if token.strip()]
         has_non_ascii = any(any(ord(char) > 127 for char in token) for token in tokens)
+        effective_user_id, global_user_id = self._scope_user_ids(user_id)
         sql = """
             SELECT id, user_id, category, subject, predicate, value, confidence, importance, source_ref
             FROM memory_facts
-            WHERE user_id = ?
+            WHERE user_id IN (?, ?)
         """
-        params: list[str] = [user_id]
+        params: list[object] = [effective_user_id, global_user_id]
         if tokens and not has_non_ascii:
             conditions = []
             for token in tokens:
@@ -242,8 +250,9 @@ class MemoryStore:
                     ]
                 )
                 params.extend([pattern, pattern, pattern, pattern])
-            sql += " WHERE " + " OR ".join(conditions)
-        sql += " ORDER BY importance DESC, last_seen DESC LIMIT ?"
+            sql += " AND (" + " OR ".join(conditions) + ")"
+        sql += " ORDER BY CASE WHEN user_id = ? THEN 0 ELSE 1 END, importance DESC, last_seen DESC LIMIT ?"
+        params.append(effective_user_id)
         params.append(str(limit if not has_non_ascii else 500))
         with self._session_factory() as connection:
             rows = connection.execute(sql, params).fetchall()
@@ -318,7 +327,7 @@ class MemoryStore:
         tags: list[str] | None = None,
         expires_at: datetime | None = None,
     ) -> dict | None:
-        now = datetime.now(timezone.utc).isoformat()
+        now = local_now_iso()
         with self._session_factory() as connection:
             cursor = connection.execute(
                 """
@@ -381,7 +390,7 @@ class MemoryStore:
         cutoff_clause = ""
         if hours is not None:
             cutoff_clause = " AND created_at >= ?"
-            params.append((datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat())
+            params.append((datetime.now().astimezone() - timedelta(hours=hours)).isoformat())
         params.append(limit)
         with self._session_factory() as connection:
             rows = connection.execute(
@@ -415,7 +424,7 @@ class MemoryStore:
         ]
 
     def old_turns(self, hours: int = 24, limit: int = 500) -> list[ConversationTurnRecord]:
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        cutoff = (datetime.now().astimezone() - timedelta(hours=hours)).isoformat()
         with self._session_factory() as connection:
             rows = connection.execute(
                 """
@@ -464,7 +473,7 @@ class MemoryStore:
         created_at: str | None = None,
         sent_at: str | None = None,
     ) -> int:
-        created_at = created_at or datetime.now(timezone.utc).isoformat()
+        created_at = created_at or local_now_iso()
         with self._session_factory() as connection:
             cursor = connection.execute(
                 """
@@ -516,7 +525,7 @@ class MemoryStore:
 
     def due_reminders(self, *, limit: int = 100, now: datetime | None = None) -> list[ReminderRecord]:
         safe_limit = max(1, min(limit, 500))
-        cutoff = (now or datetime.now(timezone.utc)).isoformat()
+        cutoff = (now or datetime.now().astimezone()).isoformat()
         with self._session_factory() as connection:
             rows = connection.execute(
                 """
@@ -532,16 +541,37 @@ class MemoryStore:
         return [self._row_to_reminder(row) for row in rows]
 
     def mark_reminder_sent(self, reminder_id: int, *, user_id: str, sent_at: str | None = None) -> dict | None:
-        sent_at = sent_at or datetime.now(timezone.utc).isoformat()
+        return self.set_reminder_status(reminder_id, user_id=user_id, status="sent", sent_at=sent_at)
+
+    def set_reminder_status(
+        self,
+        reminder_id: int,
+        *,
+        user_id: str,
+        status: str,
+        sent_at: str | None = None,
+        due_at: str | None = None,
+    ) -> dict | None:
+        sent_at = sent_at or local_now_iso()
         with self._session_factory() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE reminders
-                SET status = ?, sent_at = ?
-                WHERE user_id = ? AND id = ?
-                """,
-                ("sent", sent_at, user_id, reminder_id),
-            )
+            if due_at is None:
+                cursor = connection.execute(
+                    """
+                    UPDATE reminders
+                    SET status = ?, sent_at = ?
+                    WHERE user_id = ? AND id = ?
+                    """,
+                    (status, sent_at, user_id, reminder_id),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE reminders
+                    SET status = ?, sent_at = ?, due_at = ?
+                    WHERE user_id = ? AND id = ?
+                    """,
+                    (status, sent_at, due_at, user_id, reminder_id),
+                )
             connection.commit()
             if cursor.rowcount == 0:
                 return None
@@ -557,13 +587,7 @@ class MemoryStore:
         return self._row_to_reminder_dict(row) if row else None
 
     def cancel_reminder(self, reminder_id: int, *, user_id: str) -> bool:
-        with self._session_factory() as connection:
-            cursor = connection.execute(
-                "UPDATE reminders SET status = ? WHERE user_id = ? AND id = ?",
-                ("cancelled", user_id, reminder_id),
-            )
-            connection.commit()
-            return cursor.rowcount > 0
+        return self.set_reminder_status(reminder_id, user_id=user_id, status="cancelled") is not None
 
     def delete_reminder(self, reminder_id: int, *, user_id: str) -> bool:
         with self._session_factory() as connection:
@@ -581,17 +605,19 @@ class MemoryStore:
         if not query_embedding:
             return []
 
+        effective_user_id, global_user_id = self._scope_user_ids(user_id)
         sql = """
             SELECT id, source_type, source_ref, chunk_index, role, content, importance, metadata_json, embedding_json
             FROM memory_embeddings
-            WHERE user_id = ?
+            WHERE user_id IN (?, ?)
         """
-        params: list[object] = [user_id]
+        params: list[object] = [effective_user_id, global_user_id]
         if source_types:
             placeholders = ", ".join("?" for _ in source_types)
             sql += f" AND source_type IN ({placeholders})"
             params.extend(source_types)
-        sql += " ORDER BY importance DESC, last_seen DESC, id DESC"
+        sql += " ORDER BY CASE WHEN user_id = ? THEN 0 ELSE 1 END, importance DESC, last_seen DESC, id DESC"
+        params.append(effective_user_id)
 
         with self._session_factory() as connection:
             rows = connection.execute(sql, params).fetchall()

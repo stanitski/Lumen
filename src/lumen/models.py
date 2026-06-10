@@ -33,6 +33,8 @@ MemoryPredicate = Literal[
 KnowledgeUploadKind = Literal["text", "pdf", "image", "video", "unsupported"]
 KnowledgeUploadStatus = Literal["indexed", "pending", "unsupported"]
 ReminderStatus = Literal["pending", "sent", "cancelled", "failed"]
+PlannerActionType = Literal["memory_fact", "reminder", "reminder_list", "web_search"]
+KnowledgeScope = Literal["personal", "global"]
 
 
 class MemoryHit(BaseModel):
@@ -113,9 +115,21 @@ class TelegramSendResult(BaseModel):
     message: str = ""
 
 
+class TalkSendRequest(BaseModel):
+    message: str
+
+
+class TalkSendResult(BaseModel):
+    ok: bool
+    status_code: int
+    response: dict[str, object] = Field(default_factory=dict)
+    message: str = ""
+
+
 class KnowledgeUploadResult(BaseModel):
     status: KnowledgeUploadStatus
     kind: KnowledgeUploadKind
+    scope: KnowledgeScope
     user_id: str
     filename: str
     content_type: str
@@ -123,6 +137,31 @@ class KnowledgeUploadResult(BaseModel):
     chunks_created: int = 0
     embeddings_created: int = 0
     message: str
+
+
+class ReminderActionPayload(BaseModel):
+    text: str
+    due_at: str | None = None
+    duration_seconds: int | None = Field(default=None, ge=1)
+    repeat_interval_seconds: int | None = Field(default=None, ge=1)
+    repeat_until: str | None = None
+
+
+class PlannerAction(BaseModel):
+    type: PlannerActionType
+    payload: dict[str, object] = Field(default_factory=dict)
+
+
+class PlannerResponse(BaseModel):
+    draft_answer: str
+    actions: list[PlannerAction] = Field(default_factory=list)
+
+
+class ActionExecutionResult(BaseModel):
+    type: PlannerActionType
+    ok: bool
+    message: str
+    details: dict[str, object] = Field(default_factory=dict)
 
 
 class ReminderRecord(BaseModel):
@@ -147,3 +186,10 @@ class ReminderRequest(BaseModel):
     due_at: str
     repeat_interval_seconds: int | None = Field(default=None, ge=1)
     repeat_until: str | None = None
+
+
+class KnowledgeUploadRequest(BaseModel):
+    user_id: str | None = None
+    source_ref: str | None = None
+    scope: KnowledgeScope = "personal"
+    max_chunk_chars: int = Field(default=8000, ge=500, le=50000)

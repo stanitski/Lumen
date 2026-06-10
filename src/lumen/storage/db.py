@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
+
+from lumen.time_utils import LOCAL_TIMEZONE
 
 
 SCHEMA = """
@@ -86,7 +89,7 @@ LEGACY_TABLES = (
     "conversation_logs",
 )
 
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 
 
 class Database:
@@ -101,6 +104,7 @@ class Database:
             self._migrate_conversation_turns_without_session_id(connection)
             self._migrate_long_term_memory_user_id(connection)
             self._migrate_reminders_repeat_columns(connection)
+            self._migrate_timestamps_to_local_time(connection)
             for table_name in LEGACY_TABLES:
                 connection.execute(f"DROP TABLE IF EXISTS {table_name}")
 
@@ -171,6 +175,54 @@ class Database:
             connection.execute("ALTER TABLE reminders ADD COLUMN repeat_interval_seconds INTEGER NULL")
         if "repeat_until" not in column_names:
             connection.execute("ALTER TABLE reminders ADD COLUMN repeat_until TEXT NULL")
+
+    @staticmethod
+    def _to_local_iso(value: str | None) -> str | None:
+        if value is None:
+            return None
+        candidate = str(value).strip()
+        if not candidate:
+            return None
+        try:
+            parsed = datetime.fromisoformat(candidate)
+        except ValueError:
+            return candidate
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(LOCAL_TIMEZONE).isoformat()
+
+    def _migrate_timestamps_to_local_time(self, connection) -> None:
+        tables = {
+            "conversation_turns": ["question_created_at", "answer_created_at", "created_at"],
+            "memory_facts": ["last_seen", "expires_at"],
+            "memory_embeddings": ["created_at", "updated_at", "last_seen"],
+            "reminders": ["due_at", "created_at", "sent_at", "repeat_until"],
+        }
+        for table_name, columns in tables.items():
+            existing_columns = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+            if not existing_columns:
+                continue
+            column_names = {str(row["name"]) for row in existing_columns}
+            if not any(column in column_names for column in columns):
+                continue
+            rows = connection.execute(
+                f"SELECT id, {', '.join(column for column in columns if column in column_names)} FROM {table_name}"
+            ).fetchall()
+            for row in rows:
+                updates: dict[str, str] = {}
+                for column in columns:
+                    if column not in column_names:
+                        continue
+                    converted = self._to_local_iso(row[column])
+                    if converted is not None and converted != row[column]:
+                        updates[column] = converted
+                if updates:
+                    assignments = ", ".join(f"{column} = ?" for column in updates)
+                    params = list(updates.values()) + [row["id"]]
+                    connection.execute(
+                        f"UPDATE {table_name} SET {assignments} WHERE id = ?",
+                        params,
+                    )
 
     @contextmanager
     def session(self):
