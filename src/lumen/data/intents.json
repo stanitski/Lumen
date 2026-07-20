@@ -1,0 +1,209 @@
+[
+  {
+    "intent_id": "ask",
+    "kind": "conversational",
+    "enabled": true,
+    "description": "The user is asking a question or wants an answer.",
+    "is_default": true,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "inform",
+    "kind": "conversational",
+    "enabled": true,
+    "description": "The user is reporting or sharing information.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "correct",
+    "kind": "conversational",
+    "enabled": true,
+    "description": "The user is correcting something said earlier.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "clarify",
+    "kind": "conversational",
+    "enabled": true,
+    "description": "The user is clarifying or narrowing a previous request.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "create",
+    "kind": "conversational",
+    "enabled": true,
+    "description": "The user wants something new to be created.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "social",
+    "kind": "conversational",
+    "enabled": true,
+    "description": "The user is chatting socially without a formal task.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "none",
+    "kind": "action",
+    "enabled": true,
+    "description": "No separate operation is needed; a normal answer is enough.",
+    "is_default": true,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "reminder_list",
+    "kind": "action",
+    "enabled": true,
+    "description": "List or show reminders.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "reminder_create",
+    "kind": "action",
+    "enabled": true,
+    "description": "Create a reminder or timer.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "reminder_update",
+    "kind": "action",
+    "enabled": true,
+    "description": "Change an existing reminder or timer.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "reminder_delete",
+    "kind": "action",
+    "enabled": true,
+    "description": "Delete or cancel a reminder.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "smart_home_query",
+    "kind": "action",
+    "enabled": true,
+    "description": "Read the current state of a device or sensor.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "smart_home_command",
+    "kind": "action",
+    "enabled": true,
+    "description": "Turn something on, off, or run it now.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "routine_run",
+    "kind": "action",
+    "enabled": true,
+    "description": "Run a saved routine.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "routine_manage",
+    "kind": "action",
+    "enabled": true,
+    "description": "Create or edit a routine.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "preference_update",
+    "kind": "action",
+    "enabled": true,
+    "description": "Save a durable user preference.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "file_context",
+    "kind": "action",
+    "enabled": true,
+    "description": "Use an attached file to answer.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "knowledge_ingest",
+    "kind": "action",
+    "enabled": true,
+    "description": "Save a file into long-term knowledge.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "knowledge_query",
+    "kind": "action",
+    "enabled": true,
+    "description": "Search or fetch outside knowledge.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "memory_forget",
+    "kind": "action",
+    "enabled": true,
+    "description": "Forget something from memory.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "nutrition_log",
+    "kind": "action",
+    "enabled": true,
+    "description": "Log meals, eaten food, and calorie reports.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "nutrition_summary",
+    "kind": "action",
+    "enabled": true,
+    "description": "Summarize meals and daily calories.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  },
+  {
+    "intent_id": "mixed",
+    "kind": "action",
+    "enabled": true,
+    "description": "The request mixes multiple separate actions.",
+    "is_default": false,
+    "created_at": "2026-07-07T00:00:00+03:00",
+    "updated_at": "2026-07-07T00:00:00+03:00"
+  }
+]
