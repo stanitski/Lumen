@@ -2,6 +2,68 @@
 
 This file stores durable technical, architectural, database, reporting, integration, naming, and business-logic decisions that future work should reuse instead of rediscovering.
 
+## 2026-07-22 - Google Calendar is projected through Home Assistant into one-time reminders
+
+- Context:
+  Google Calendar is the source of truth for scheduled events, while Lumen already has durable Telegram delivery, confirmation, and 15-minute snooze behavior in `ReminderService`.
+- Decision:
+  Lumen never calls Google directly. At startup, reconnect, and Kyiv day rollover it reads the current day from Home Assistant Calendar REST. HA WebSocket `calendar/event/subscribe` is an invalidation signal followed by an authoritative REST reread. Each occurrence with a stable `uid` is idempotently projected into a one-time reminder using nullable `reminders.source_ref` (schema `v33`); timed events use their start, all-day events use configured 09:00 `Europe/Kyiv`. Deleted or moved occurrences cancel only still-pending projections. Existing delivering, awaiting-confirmation, snoozed, and completed rows remain immutable.
+- Consequences:
+  No cron poll, Google credentials, availability heuristics, or parallel calendar table are introduced. Event summary and description are delivered as stored by HA, then the existing Telegram confirmation/snooze state machine takes over.
+
+## 2026-07-22 - Calendar creation is a single non-retrying Home Assistant action
+
+- Context:
+  Lumen must create Google Calendar events from an explicit natural-language command without conflict checks, phrase heuristics, or intermediate reminder rows.
+- Decision:
+  `GetContract` emits one strictly normalized `calendar.create` item and never chooses the target entity. `CalendarActionService` always writes to configured `HOME_ASSISTANT_CALENDAR_WRITE_ENTITY_ID` through one HA `calendar.create_event` REST call. Missing timed end uses configured 60 minutes; missing all-day end becomes the next exclusive date. A successful write immediately refreshes the authoritative current-day HA snapshot. HTTP timeout or transport loss is `unknown` and is never retried automatically.
+- Consequences:
+  Explicit creation happens immediately and does not check availability. A timeout may require manual calendar inspection, but cannot create an automatic duplicate. Events created for today enter the existing reminder projection immediately; future events are projected on their day.
+
+## 2026-07-21 - Parent/child snooze preserves recurring schedules
+
+- Context:
+  Reusing a recurring reminder row for `+15` minute snooze overwrote its scheduled time and could shift the next daily or weekly occurrence.
+- Decision:
+  Schema `v32` adds nullable `reminders.parent_reminder_id`. A root owns the user schedule and keeps its original `due_at` while `snoozed`. Silence or `no` atomically creates exactly one one-shot child at `+15` minutes, with the root text, user and allowlisted route. Child `yes` completes the occurrence and advances or completes the root from its original schedule; child silence or `no` closes that child and creates its replacement. Lists and ordinals expose roots only, using an active child's due time as the effective display time; root cancellation cascades to active children. A partial unique index plus strict post-contention re-read makes a concurrent snooze idempotent only when the root is `snoozed` and exactly one active child exists.
+- Consequences:
+  Parent recurrence does not drift during snooze. Wake scheduling includes child due times. If a child exhausts technical delivery retries, its eligible recurring root advances to the next future slot; a one-time or exhausted root fails rather than remaining `snoozed` without a wake.
+- Revisit when:
+  Reminder editing, multiple concurrent occurrences per root, or richer snooze policies are approved.
+
+## 2026-07-21 - Persist reminder return routes and fail closed
+
+- Context:
+  A scheduled reminder no longer has the connector request that supplied its reply destination. Reconstructing a Telegram target from `user_id` is unsafe and caused delivery ambiguity.
+- Decision:
+  On reminder creation, persist only the allowlisted connector return route `target_channel="telegram"` and canonical numeric `target_chat_id` in nullable `reminders.delivery_route_json` (schema `v31`). Scheduled delivery reuses that route through `DeliveryService`; it never maps a user ID to a destination. A missing or invalid route does not call Home Assistant and remains pending with bounded 15-minute retries. Each new delivery claim uses a cryptographically random 32-hex `delivery_id`; structured confirmation must exactly match both `reminder_id` and `delivery_id`. The Home Assistant Telegram button carries both values.
+- Consequences:
+  Recurring occurrences and snoozes keep their original route. Legacy rows without a route fail closed instead of being delivered to an inferred chat. Operators must rebuild and restart Lumen for schema `v31`, then inspect or explicitly repair route-less legacy rows; no automatic backfill is permitted.
+- Revisit when:
+  A second connector channel is explicitly designed, allowlisted, and verified end to end.
+
+## 2026-07-20 - Isolated reminder state machine with correlated confirmation
+
+- Context:
+  The chat-only runtime needs persistent reminders without restoring planner, skills, or task execution.
+- Decision:
+  `GetContract` owns language understanding and returns structured reminder create/list/cancel-list-item data. `ReminderService` owns SQLite validation, lease-based delivery claims, and one `WindowsWakeAdapter` task for the nearest pending due time or confirmation deadline. Delivery is at-least-once and uses a correlated `delivery_id`. Structured confirmations require matching `reminder_id` and `delivery_id`; plain yes/no is classified by `GetContract`. Silence or explicit `no` follows the parent/child snooze decision above.
+- Consequences:
+  Timeout, malformed, or ambiguous contracts cannot mutate reminders. Wake scheduling failures do not remove database records. Daily and weekly recurrence is calendar-based in `Europe/Kyiv`.
+- Revisit when:
+  Editing, pagination beyond ten active rows, or richer recurrence rules are approved.
+
+## 2026-07-20 - Atomic multi-reminder creation and database-backed listing
+
+- Context:
+  A single natural-language request can contain multiple reminders, while a prior single-draft parser could silently retain a second time in the reminder label. A dialogue-generated list could also disagree with live SQLite state.
+- Decision:
+  Validate up to 10 `GetContract` drafts before writing, reject the whole request on any invalid, ambiguous, unsupported, or duplicate item, and insert the complete list in one SQLite transaction. Recalculate the wake task once after commit. A list reads only the current user's active `reminders` rows and records a user-scoped in-memory snapshot in `due_at, id` order; `cancel_list_item` can cancel only its exact displayed ordinal. There is no delete-all operation.
+- Consequences:
+  Multi-reminder requests cannot partially succeed, list answers cannot hallucinate archived or legacy reminders, and an absent, stale, or state-changed snapshot refuses cancellation without recomputing an ordinal.
+- Revisit when:
+  Cancellation, editing, pagination beyond ten active rows, or broader Ukrainian temporal grammar is approved.
+
 ## 2026-07-20 - Current documentation must describe only the chat-only runtime
 
 - Context:

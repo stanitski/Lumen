@@ -25,6 +25,7 @@ from lumen.models import (
     SleepResult,
 )
 from lumen.time_utils import LOCAL_TIMEZONE, local_now
+from lumen.timezones import kyiv_timezone
 
 
 @dataclass(frozen=True)
@@ -1008,20 +1009,24 @@ class MemoryService:
         include_recent_turns: bool = True,
         include_topic_expansion: bool = True,
         force_semantic_dialogue: bool = False,
+        query_contract: dict[str, object] | None = None,
     ) -> dict[str, object]:
         window_hours = max(1, int(self._settings.dialogue_memory_window_hours))
         recent_turns = self._store.recent_turns(user_id, limit=12, hours=window_hours) if include_recent_turns else []
         context_mode = self._context_mode_for_payload(payload_text)
         query_topic_embedding: list[float] = []
         if context_mode != "recent_only" and force_semantic_dialogue:
-            routing_context = self._routing_context_for_contract(user_id)
-            query_contract, query_vector = await asyncio.gather(
-                self.get_contract(payload_text, routing_context=routing_context),
-                self.get_embedding(payload_text),
-            )
+            if query_contract is None:
+                routing_context = self._routing_context_for_contract(user_id)
+                query_contract, query_vector = await asyncio.gather(
+                    self.get_contract(payload_text, routing_context=routing_context),
+                    self.get_embedding(payload_text),
+                )
+            else:
+                query_vector = await self.get_embedding(payload_text)
             query_topic = str(query_contract["topic"])
         else:
-            query_contract = self._default_query_contract()
+            query_contract = query_contract or self._default_query_contract()
             query_topic = ""
             query_vector = []
         retrieval_policy = self.get_retrieval_policy(query_contract, payload_text)
@@ -1535,7 +1540,13 @@ class MemoryService:
             "time_scope": "none",
             "completeness": "normal",
             "context_sources": [],
+            "reminder": {"action": "none", "items": [], "delete_ordinal": None, "confirmation": ""},
+            "calendar": {"action": "none", "item": {}},
         }
+
+    async def get_contract_for_user(self, text: str, *, user_id: str) -> dict[str, object]:
+        """Classify one request with only approved source-routing metadata."""
+        return await self.get_contract(text, routing_context=self._routing_context_for_contract(user_id))
 
     def _routing_context_for_contract(self, user_id: str) -> str:
         sources: list[dict[str, str]] = []
@@ -1615,7 +1626,7 @@ class MemoryService:
                     "role": "system",
                     "content": (
                         "Analyze the user request. Return ONLY JSON with this exact shape: "
-                        '{"topic":"lowercase_english_snake_case_or_empty","answer_mode":"direct_answer|explain|list_records|summarize|compare|find|calculate|continue_context|create_or_update","time_scope":"today|yesterday|explicit_period|none","completeness":"normal|complete","context_sources":[{"source":"telegram|web|home_assistant|knowledge","operation":"search|read_state","query":"short search query","scope":"approved_chats|explicit_chat|default","source_kind":"user|group|channel|unspecified","date_from":"YYYY-MM-DD_or_empty","date_to":"YYYY-MM-DD_or_empty"}]}. '
+                        '{"topic":"lowercase_english_snake_case_or_empty","answer_mode":"direct_answer|explain|list_records|summarize|compare|find|calculate|continue_context|create_or_update","time_scope":"today|yesterday|explicit_period|none","completeness":"normal|complete","context_sources":[{"source":"telegram|web|home_assistant|knowledge","operation":"search|read_state","query":"short search query","scope":"approved_chats|explicit_chat|default","source_kind":"user|group|channel|unspecified","date_from":"YYYY-MM-DD_or_empty","date_to":"YYYY-MM-DD_or_empty"}],"reminder":{"action":"none|create|list|cancel_list_item","items":[{"text":"action","date":"YYYY-MM-DD","time":"HH:MM","recurrence_kind":"none|daily|weekly","recurrence_weekday":"0_to_6_or_null","repeat_until":"YYYY-MM-DD_or_empty"}],"delete_ordinal":"positive_integer_or_null","confirmation":"yes|no_or_empty"},"calendar":{"action":"none|create","item":{"summary":"event title","description":"optional description","location":"optional location","all_day":"boolean","start":"aware ISO datetime or YYYY-MM-DD","end":"aware ISO datetime, YYYY-MM-DD, or empty"}}}. '
                         "Use an empty topic only for greetings, small talk, or ambiguous text. "
                         "Use list_records when the user asks to enumerate recorded items, and complete when no relevant confirmed item may be omitted. "
                         "Add context_sources only when the answer requires external Telegram, web, Home Assistant, or uploaded-knowledge data. "
@@ -1628,7 +1639,21 @@ class MemoryService:
                         "Allowed pairs are telegram/search, web/search, home_assistant/read_state, and knowledge/search. "
                         f"Today in the user's local timezone is {local_now().date().isoformat()}. "
                         "For Telegram, use source_kind=user for a person's private chat, group for a group chat, channel for news or broadcast channels, and unspecified only when the user gave no type. "
-                        "For an explicit date or date range, set inclusive date_from and date_to as ISO calendar dates; otherwise leave both empty."
+                        "For an explicit date or date range, set inclusive date_from and date_to as ISO calendar dates; otherwise leave both empty. "
+                        "Only create when every item is unambiguous. Use cancel_list_item only for an explicit displayed ordinal; never infer all-reminder deletion. "
+                        "Reminder action and confirmation are mutually exclusive: set confirmation yes/no only when action is none; for create, list, or cancel_list_item set confirmation empty. "
+                        f"For one shared daily action with multiple times, return one create item per time with the same text and recurrence_kind=daily. Example: user='daily at 10:30 and 23:30 remind me to take medicine' -> {{\"reminder\":{{\"action\":\"create\",\"items\":[{{\"text\":\"take medicine\",\"date\":\"{local_now().date().isoformat()}\",\"time\":\"10:30\",\"recurrence_kind\":\"daily\",\"recurrence_weekday\":null,\"repeat_until\":\"\"}},{{\"text\":\"take medicine\",\"date\":\"{local_now().date().isoformat()}\",\"time\":\"23:30\",\"recurrence_kind\":\"daily\",\"recurrence_weekday\":null,\"repeat_until\":\"\"}}],\"delete_ordinal\":null,\"confirmation\":\"\"}}}}. "
+                        "Set confirmation yes/no only for an unambiguous plain reply to a fired reminder. "
+                        "Set calendar.action=create only for an explicit command to add one event to the calendar; do not infer creation from questions or suggestions. "
+                        "An explicit calendar creation command has priority over unrelated retrieval examples: when calendar.action=create, keep context_sources empty and reminder.action=none. "
+                        "Never infer Telegram retrieval from day or date wording; Telegram context requires an explicit Telegram source in the user's request. "
+                        "Do not check availability or conflicts and do not put a calendar entity_id in the contract. "
+                        "Preserve the user's event title and explicitly supplied description/location faithfully: do not paraphrase, generalize, replace people, or invent details. "
+                        "If description or location was not explicitly supplied, return an empty string for that field. "
+                        "For timed events use an ISO datetime with an explicit UTC offset for start and end; end may be empty so the service can apply its configured 60-minute duration. "
+                        "For all-day events use an ISO date for start; end may be empty so the service uses start plus one day, or an explicit later ISO date as the exclusive end. "
+                        f"Example: user='Додай у календар {local_now().date().isoformat()} о 15:00 зустріч з Іваном, опис: обговорити проєкт' -> {{\"calendar\":{{\"action\":\"create\",\"item\":{{\"summary\":\"Зустріч з Іваном\",\"description\":\"Обговорити проєкт\",\"location\":\"\",\"all_day\":false,\"start\":\"{datetime.combine(local_now().date(), datetime.min.time().replace(hour=15), tzinfo=kyiv_timezone()).isoformat()}\",\"end\":\"\"}}}}}}. "
+                        f"Example: user='Додай у календар на весь день {local_now().date().isoformat()} подію День народження Марії' -> {{\"calendar\":{{\"action\":\"create\",\"item\":{{\"summary\":\"День народження Марії\",\"description\":\"\",\"location\":\"\",\"all_day\":true,\"start\":\"{local_now().date().isoformat()}\",\"end\":\"\"}}}}}}."
                     ),
                 },
                 *([{"role": "system", "content": routing_context}] if routing_context else []),
@@ -1651,7 +1676,102 @@ class MemoryService:
             "time_scope": time_scope if time_scope in self._TIME_SCOPES else "none",
             "completeness": completeness if completeness in self._COMPLETENESS_LEVELS else "normal",
             "context_sources": self._normalize_context_sources(raw.get("context_sources"), fallback_query=text),
+            "reminder": self._normalize_reminder_contract(raw.get("reminder")),
+            "calendar": self._normalize_calendar_contract(raw.get("calendar")),
         }
+
+    @staticmethod
+    def _normalize_reminder_contract(raw: object) -> dict[str, object]:
+        default = {"action": "none", "items": [], "delete_ordinal": None, "confirmation": ""}
+        if not isinstance(raw, dict):
+            return default
+        action = str(raw.get("action", "none")).strip().lower()
+        confirmation = str(raw.get("confirmation", "")).strip().lower()
+        if confirmation not in {"", "yes", "no"}:
+            return default
+        if action == "list":
+            return {**default, "action": action}
+        if action == "cancel_list_item":
+            ordinal = raw.get("delete_ordinal")
+            if not isinstance(ordinal, int) or isinstance(ordinal, bool) or ordinal < 1:
+                return default
+            return {**default, "action": action, "delete_ordinal": ordinal}
+        if action == "create" and isinstance(raw.get("items"), list):
+            return {**default, "action": action, "items": raw["items"]}
+        return {**default, "confirmation": confirmation}
+
+    @staticmethod
+    def _normalize_calendar_contract(raw: object) -> dict[str, object]:
+        default = {"action": "none", "item": {}}
+        if not isinstance(raw, dict) or str(raw.get("action", "none")).strip().lower() != "create":
+            return default
+        item = raw.get("item")
+        if not isinstance(item, dict):
+            return default
+        summary = item.get("summary")
+        description = item.get("description", "")
+        location = item.get("location", "")
+        all_day = item.get("all_day")
+        start_value = item.get("start")
+        end_value = item.get("end", "")
+        if not isinstance(summary, str) or not summary.strip():
+            return default
+        if not isinstance(description, str) or not isinstance(location, str) or not isinstance(all_day, bool):
+            return default
+        if not isinstance(start_value, str) or not start_value.strip():
+            return default
+        if not isinstance(end_value, str):
+            return default
+        if all_day:
+            try:
+                start = date.fromisoformat(start_value.strip())
+            except ValueError:
+                return default
+            normalized_start = start.isoformat()
+            if end_value.strip():
+                try:
+                    end = date.fromisoformat(end_value.strip())
+                except ValueError:
+                    return default
+                if end <= start:
+                    return default
+                normalized_end = end.isoformat()
+            else:
+                normalized_end = ""
+        else:
+            normalized_start = MemoryService._normalize_calendar_datetime(start_value)
+            normalized_end = MemoryService._normalize_calendar_datetime(end_value) if end_value.strip() else ""
+            if not normalized_start or (end_value.strip() and not normalized_end):
+                return default
+            if normalized_end and datetime.fromisoformat(normalized_end) <= datetime.fromisoformat(normalized_start):
+                return default
+        return {
+            "action": "create",
+            "item": {
+                "summary": summary.strip(),
+                "description": description.strip(),
+                "location": location.strip(),
+                "all_day": all_day,
+                "start": normalized_start,
+                "end": normalized_end,
+            },
+        }
+
+    @staticmethod
+    def _normalize_calendar_datetime(value: str) -> str:
+        candidate = value.strip()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T.+", candidate):
+            return ""
+        try:
+            parsed = datetime.fromisoformat(candidate)
+        except ValueError:
+            return ""
+        kyiv = kyiv_timezone()
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=kyiv)
+        else:
+            parsed = parsed.astimezone(kyiv)
+        return parsed.isoformat()
 
     async def get_topic(self, text: str) -> str:
         return str((await self.get_contract(text))["topic"])

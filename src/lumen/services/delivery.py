@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from urllib.parse import urlparse
@@ -19,13 +18,6 @@ class DeliveryService:
     def __init__(self, settings: Settings, logger: logging.Logger | None = None) -> None:
         self._settings = settings
         self._logger = logger or logging.getLogger("lumen")
-
-    @staticmethod
-    def _format_json_for_log(payload: object) -> str:
-        try:
-            return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
-        except TypeError:
-            return str(payload)
 
     @staticmethod
     def _normalize_plain_text(text: str) -> str:
@@ -172,30 +164,29 @@ class DeliveryService:
             headers["Authorization"] = f"Bearer {self._settings.home_assistant_token.strip()}"
 
         self._logger.debug(
-            "Posting Home Assistant callback to %s:\n%s",
-            callback_url,
-            self._format_json_for_log(payload.model_dump()),
+            "Posting Home Assistant callback kind=%s request_id=%s reminder_id=%s delivery_id_present=%s voice=%s",
+            payload.kind,
+            payload.request_id,
+            payload.reminder_id,
+            bool(payload.metadata.get("delivery_id")),
+            payload.voice,
         )
         async with httpx.AsyncClient(timeout=self._settings.ollama_timeout_seconds) as client:
             response = await client.post(callback_url, headers=headers, json=payload.model_dump())
 
         if response.is_success:
             self._logger.debug(
-                "Home Assistant callback accepted: status=%s request_id=%s kind=%s voice=%s",
+                "Home Assistant callback accepted status=%s kind=%s request_id=%s reminder_id=%s delivery_id_present=%s voice=%s",
                 response.status_code,
-                payload.request_id,
                 payload.kind,
+                payload.request_id,
+                payload.reminder_id,
+                bool(payload.metadata.get("delivery_id")),
                 payload.voice,
             )
             return
-
-        try:
-            response_body = response.json()
-        except json.JSONDecodeError:
-            response_body = {"raw": response.text}
         raise RuntimeError(
-            f"Home Assistant callback failed with status {response.status_code}: "
-            f"{self._format_json_for_log(response_body)}"
+            f"Home Assistant callback failed with status {response.status_code}."
         )
 
     async def deliver_chat_answer(

@@ -21,9 +21,13 @@ Lumen is a local FastAPI assistant with one active runtime: chat, memory, knowle
 3. Audio/video attachments are normalized with `ffmpeg`, transcribed by `faster-whisper`, then routed into the same text chat path.
 4. `MemoryService` retrieves relevant facts, dialogue evidence, and knowledge evidence and builds a query contract.
 5. `ContextExecutor` validates and dispatches optional read-only requests for `telegram`, `web`, `home_assistant`, and `knowledge`.
-6. Ollama generates the final answer.
-7. The turn is persisted, then post-processing extracts stable facts and updates dialogue metadata.
-8. `DeliveryService` sends callback responses through Home Assistant; Ollama-compatible routes return inline.
+6. `GetContract` класифікує reminder create/list/cancel-list-item; `ReminderService` зберігає root schedule та one-shot snooze children у SQLite, використовує `DeliveryService` і один nearest Windows wake task.
+7. Під час створення reminder з connector ingress зберігається лише allowlisted Telegram return route; scheduled delivery повторно використовує його, а не `user_id`.
+8. `HomeAssistantCalendarClient` читає поточний день через HA Calendar REST, слухає `calendar/event/subscribe` через HA WebSocket і проєктує Google Calendar occurrences в одноразові SQLite reminders; all-day події отримують `due_at` о 09:00 `Europe/Kyiv`.
+9. Для явної команди створення `GetContract` формує typed `calendar.create`; `CalendarActionService` один раз викликає HA `calendar.create_event` лише для configured write entity. Конфлікти не перевіряються, відсутній timed end отримує configured 60 хвилин, а успіх одразу запускає authoritative current-day refresh.
+10. Ollama generates the final answer.
+11. The turn is persisted, then post-processing extracts stable facts and updates dialogue metadata.
+12. `DeliveryService` sends callback responses through Home Assistant; Ollama-compatible routes return inline.
 
 Important endpoints:
 
@@ -42,11 +46,12 @@ Important endpoints:
 - `memory_facts`: stable user facts and preferences.
 - `memory_embeddings`: indexed knowledge chunks.
 - `knowledge_upload_sessions`: upload state.
+- `reminders`: isolated reminder state, including `delivery_route_json`, nullable `parent_reminder_id`, and nullable calendar idempotency key `source_ref` from schema `v33`.
 - `schema_version`: schema marker.
 
 ## Current truth
 
-The current runtime does not use planner, skills, tasks, reminders, policy execution, scheduler loops, or smart-home control.
+The current runtime does not use planner, skills, tasks, policy execution, scheduler loops, or smart-home control. Reminders are the one isolated optional integration; they do not restore those subsystems.
 
 Historical documents may still mention those subsystems. They are not the source of truth for the current version unless a file explicitly says it is historical or target-state design only.
 
@@ -55,4 +60,4 @@ Historical documents may still mention those subsystems. They are not the source
 - The active process on port `8010` may still be an older binary until a controlled restart is completed.
 - Full live verification against Ollama and Home Assistant remains TBD.
 - `ContextExecutor` still has pending handlers for some source/operation pairs.
-- If reminders are rebuilt later, they should be introduced as an isolated optional integration, not by reviving the removed planner/skills/tasks stack.
+- Calendar projection requires configured `HOME_ASSISTANT_CALENDAR_ENTITY_IDS` and canonical `HOME_ASSISTANT_CALENDAR_TARGET_CHAT_ID`; without both, it stays disabled. A rebuilt and restarted runtime applies schema `v33`.

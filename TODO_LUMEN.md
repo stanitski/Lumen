@@ -2,6 +2,9 @@
 
 ## Now
 
+- Verify one intentional live calendar-create command through Telegram, including a description and the configured 60-minute default; do not create an automated test event in the user's calendar.
+- Verify one live timed calendar event, one all-day event, one update, and one deletion through HA; the approved main and two Birthdays entities are already configured.
+- Verify one deployed reminder through Windows Task Scheduler wake with the current-user interactive principal, and a structured Home Assistant `reminder_confirmed:<id>:<delivery_id>` callback.
 - Restart the deployed Lumen process from the cleaned source and verify one text message through Home Assistant.
 - Send one audio and one video connector message to verify download, `ffmpeg`, faster-whisper, and chat delivery end to end.
 - Verify existing explicit Telegram source facts and run one live approved-channel and one approved-chat lookup through `/memory` before relying on Telegram context.

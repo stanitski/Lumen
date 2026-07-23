@@ -1,6 +1,7 @@
 """Application settings loaded from environment variables and `.env`."""
 
 import sys
+from datetime import time
 from pathlib import Path
 
 from pydantic import field_validator
@@ -32,7 +33,7 @@ class Settings(BaseSettings):
     ollama_dialogue_model: str = ""
     ollama_embedding_model: str = "embeddinggemma"
     ollama_timeout_seconds: float = 120.0
-    ollama_client_keep_alive: str = "30m"
+    ollama_client_keep_alive: str = "5m"
     ollama_debug_dump_path: str = "./data/debug/last_ollama_request.json"
     ollama_compat_user_id: str = ""
     dialogue_memory_window_hours: int = 3
@@ -41,6 +42,12 @@ class Settings(BaseSettings):
     home_assistant_token: str = ""
     home_assistant_webhook_id: str = "lumen_hook_f8e9d2a1"
     home_assistant_webhook_url: str = ""
+    home_assistant_calendar_entity_ids: str = ""
+    home_assistant_calendar_write_entity_id: str = ""
+    home_assistant_calendar_target_chat_id: str = ""
+    home_assistant_calendar_all_day_time: str = "09:00"
+    home_assistant_calendar_reconnect_seconds: float = 5.0
+    home_assistant_calendar_default_duration_minutes: int = 60
     knowledge_paths: str = "./data/knowledge"
     stt_model: str = "small"
     stt_device: str = "cpu"
@@ -60,6 +67,36 @@ class Settings(BaseSettings):
         path = Path(value)
         return str(path if path.is_absolute() else PROJECT_ROOT / path)
 
+    @field_validator("home_assistant_calendar_all_day_time")
+    @classmethod
+    def _validate_calendar_all_day_time(cls, value: str) -> str:
+        parsed = time.fromisoformat(value)
+        if parsed.second or parsed.microsecond:
+            raise ValueError("HOME_ASSISTANT_CALENDAR_ALL_DAY_TIME must be precise to a minute")
+        return value
+
+    @field_validator("home_assistant_calendar_reconnect_seconds")
+    @classmethod
+    def _validate_calendar_reconnect_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("HOME_ASSISTANT_CALENDAR_RECONNECT_SECONDS must be greater than zero")
+        return value
+
+    @field_validator("home_assistant_calendar_default_duration_minutes")
+    @classmethod
+    def _validate_calendar_default_duration(cls, value: int) -> int:
+        if not 1 <= value <= 1440:
+            raise ValueError("HOME_ASSISTANT_CALENDAR_DEFAULT_DURATION_MINUTES must be between 1 and 1440")
+        return value
+
     @property
     def knowledge_path_list(self) -> list[str]:
         return [item.strip() for item in self.knowledge_paths.split(";") if item.strip()]
+
+    @property
+    def home_assistant_calendar_entity_id_list(self) -> list[str]:
+        return [item.strip() for item in self.home_assistant_calendar_entity_ids.split(";") if item.strip()]
+
+    @property
+    def home_assistant_calendar_all_day_notification_time(self) -> time:
+        return time.fromisoformat(self.home_assistant_calendar_all_day_time)

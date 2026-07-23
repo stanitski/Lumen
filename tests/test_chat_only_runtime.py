@@ -6,8 +6,10 @@ from datetime import datetime, timedelta
 from lumen.config import Settings
 from lumen.models import ChatRequest, ConversationTurnRecord, EmbeddingHit
 from lumen.services.chat_only import ChatOnlyService
+from lumen.services.calendar_actions import CalendarActionResult, CalendarCreateRequest
 from lumen.services.context_executor import ContextExecutionResult
 from lumen.services.memory import MemoryService
+from lumen.services.reminders import ReminderInterception
 
 
 class FakeOllama:
@@ -28,6 +30,10 @@ class FakeMemoryService:
         self.postprocessed_turn_ids: list[int] = []
         self.retrieval_policy: dict[str, bool] | None = None
         self.query_contract: dict[str, object] | None = None
+        self.contract_calls = 0
+        self.context_contract_calls = 0
+        self.raise_contract = False
+        self.raise_context = False
 
     def resolve_user_id(self, payload: ChatRequest) -> str:
         return payload.user_id or "VST"
@@ -36,8 +42,26 @@ class FakeMemoryService:
         del text, user_id
         return False
 
+    async def get_contract_for_user(self, text: str, *, user_id: str) -> dict[str, object]:
+        del text, user_id
+        self.contract_calls += 1
+        if self.raise_contract:
+            raise TimeoutError("contract timeout")
+        return self.query_contract or self._default_query_contract()
+
+    @staticmethod
+    def _default_query_contract() -> dict[str, object]:
+        return {
+            "topic": "", "answer_mode": "direct_answer", "time_scope": "none", "completeness": "normal",
+            "context_sources": [], "reminder": {"action": "none", "items": [], "delete_ordinal": None, "confirmation": ""},
+        }
+
     async def build_planner_context(self, **kwargs: object) -> dict[str, object]:
+        if self.raise_context:
+            raise RuntimeError("context build failed")
         self.context_options = kwargs
+        if "query_contract" not in kwargs:
+            self.context_contract_calls += 1
         context = {
             "memory_context": "Memory:\n<none>",
             "dialogue_context": "Dialogue:\n<none>",
@@ -48,8 +72,8 @@ class FakeMemoryService:
         }
         if self.retrieval_policy is not None:
             context["retrieval_policy"] = self.retrieval_policy
-        if self.query_contract is not None:
-            context["query_contract"] = self.query_contract
+        supplied_contract = kwargs.get("query_contract")
+        context["query_contract"] = supplied_contract if isinstance(supplied_contract, dict) else self.query_contract or self._default_query_contract()
         return context
 
     def recent_dialogue_turns(self, *, user_id: str, limit: int = 6) -> list[object]:
@@ -94,6 +118,30 @@ class FakeDeliveryService:
         self.calls.append(kwargs)
 
 
+class FakeReminderService:
+    def __init__(self) -> None:
+        self.contracts: list[dict[str, object]] = []
+        self.metadata: list[dict[str, object]] = []
+        self.delivery_routes: list[dict[str, object] | None] = []
+        self.result: ReminderInterception | None = None
+
+    def intercept_contract(self, *, contract: dict[str, object], **kwargs: object) -> ReminderInterception | None:
+        self.contracts.append(contract)
+        self.metadata.append(kwargs.get("metadata", {}))
+        self.delivery_routes.append(kwargs.get("delivery_route"))
+        return self.result
+
+
+class FakeCalendarActionService:
+    def __init__(self, result: CalendarActionResult) -> None:
+        self.result = result
+        self.contracts: list[dict[str, object]] = []
+
+    async def execute(self, contract: dict[str, object]) -> CalendarActionResult:
+        self.contracts.append(contract)
+        return self.result
+
+
 class FakeContextExecutor:
     def __init__(self) -> None:
         self.calls: list[object] = []
@@ -109,6 +157,25 @@ class FakeContextExecutor:
 
 
 class ChatOnlyServiceTests(unittest.IsolatedAsyncioTestCase):
+    def test_reminder_route_allowlist_rejects_invalid_values(self) -> None:
+        self.assertEqual(
+            {"target_channel": "telegram", "target_chat_id": "-1001234567890"},
+            ChatOnlyService._reminder_delivery_route({"target_channel": "telegram", "target_chat_id": "-1001234567890"}),
+        )
+        for route in (
+            {"target_channel": "discord", "target_chat_id": "123"},
+            {"target_channel": "telegram", "target_chat_id": "not-numeric"},
+            {"target_channel": "telegram", "target_chat_id": "1" * 501},
+        ):
+            with self.subTest(route=route):
+                self.assertIsNone(ChatOnlyService._reminder_delivery_route(route))
+        self.assertEqual(
+            {"target_channel": "telegram", "target_chat_id": "123"},
+            ChatOnlyService._reminder_delivery_route(
+                {"target_channel": "telegram", "target_chat_id": "123", "scope": "private"}
+            ),
+        )
+
     async def test_chat_executes_contract_context_sources_before_answer(self) -> None:
         memory = FakeMemoryService()
         memory.query_contract = {
@@ -154,11 +221,176 @@ class ChatOnlyServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(False, memory.context_options["include_recent_turns"])
         self.assertEqual(False, memory.context_options["include_topic_expansion"])
         self.assertEqual(True, memory.context_options["force_semantic_dialogue"])
+        self.assertNotIn("query_contract", memory.context_options)
+        self.assertEqual(1, memory.context_contract_calls)
         self.assertEqual("chat", memory.stored_turn["turn_meta"]["kind"])
         self.assertEqual("inline", result.delivery_outcome)
         self.assertEqual([], delivery.calls)
         self.assertEqual([7], memory.postprocessed_turn_ids)
         self.assertFalse(any("Skill:" in item["content"] for item in ollama.messages))
+        self.assertEqual(0, memory.contract_calls)
+        self.assertIn("Do not claim to perform actions, create reminders,", ollama.messages[0]["content"])
+        self.assertNotIn("deterministic reminder service", ollama.messages[0]["content"])
+
+    async def test_reminder_contract_short_circuits_final_ollama(self) -> None:
+        memory = FakeMemoryService()
+        memory.query_contract = {
+            "topic": "medication_reminder",
+            "answer_mode": "direct_answer",
+            "time_scope": "none",
+            "completeness": "normal",
+            "context_sources": [],
+            "reminder": {"action": "create", "items": [{"text": "take medicine"}], "delete_ordinal": None, "confirmation": ""},
+        }
+        reminder = FakeReminderService()
+        reminder.result = ReminderInterception("Reminder recorded.")
+        ollama = FakeOllama()
+        service = ChatOnlyService(
+            ollama=ollama, memory_service=memory, delivery_service=FakeDeliveryService(),
+            settings=Settings(), reminder_service=reminder,
+        )
+
+        result = await service.process_chat_request_result(
+            ChatRequest(text="Нагадай завтра о 09:00 воду", user_id="test-user"), "timeout", deliver=False,
+        )
+
+        self.assertEqual("Reminder recorded.", result.answer)
+        self.assertEqual("skipped", result.persistence_outcome)
+        self.assertEqual([], ollama.messages)
+        self.assertEqual(1, len(reminder.contracts))
+        self.assertEqual("create", reminder.contracts[0]["reminder"]["action"])
+
+    async def test_calendar_create_contract_executes_once_and_short_circuits_final_ollama(self) -> None:
+        memory = FakeMemoryService()
+        memory.query_contract = {
+            "topic": "calendar_event_creation",
+            "answer_mode": "create_or_update",
+            "time_scope": "explicit_period",
+            "completeness": "normal",
+            "context_sources": [],
+            "reminder": {"action": "none", "items": [], "delete_ordinal": None, "confirmation": ""},
+            "calendar": {
+                "action": "create",
+                "item": {
+                    "summary": "Project meeting",
+                    "description": "Discuss release",
+                    "location": "",
+                    "all_day": False,
+                    "start": "2026-07-25T15:00:00+03:00",
+                    "end": "",
+                },
+            },
+        }
+        request = CalendarCreateRequest(
+            summary="Project meeting",
+            all_day=False,
+            start=datetime.fromisoformat("2026-07-25T15:00:00+03:00"),
+            end=datetime.fromisoformat("2026-07-25T16:00:00+03:00"),
+            description="Discuss release",
+        )
+        calendar = FakeCalendarActionService(CalendarActionResult("created", "created", request, True))
+        ollama = FakeOllama()
+        service = ChatOnlyService(
+            ollama=ollama,
+            memory_service=memory,
+            delivery_service=FakeDeliveryService(),
+            settings=Settings(),
+            calendar_action_service=calendar,
+        )
+
+        result = await service.process_chat_request_result(
+            ChatRequest(text="Add a project meeting", user_id="test-user"),
+            "calendar-create",
+            deliver=False,
+        )
+
+        self.assertEqual("Подію додано до календаря: Project meeting, 25.07.2026 15:00–16:00.", result.answer)
+        self.assertEqual("created", result.metadata["calendar_action_status"])
+        self.assertEqual(1, len(calendar.contracts))
+        self.assertEqual([], ollama.messages)
+
+    async def test_calendar_unknown_result_is_not_reported_as_created(self) -> None:
+        memory = FakeMemoryService()
+        memory.query_contract = {
+            **memory._default_query_contract(),
+            "calendar": {"action": "create", "item": {"summary": "Meeting"}},
+        }
+        calendar = FakeCalendarActionService(CalendarActionResult("unknown", "unknown"))
+        service = ChatOnlyService(
+            ollama=FakeOllama(),
+            memory_service=memory,
+            delivery_service=FakeDeliveryService(),
+            settings=Settings(),
+            calendar_action_service=calendar,
+        )
+
+        result = await service.process_chat_request_result(
+            ChatRequest(text="Add meeting", user_id="test-user"),
+            "calendar-unknown",
+            deliver=False,
+        )
+
+        self.assertIn("не створити дублікат", result.answer)
+        self.assertEqual("error", result.execution_outcome)
+
+    async def test_callback_metadata_route_is_passed_to_reminder_creation(self) -> None:
+        memory = FakeMemoryService()
+        memory.query_contract = {
+            "topic": "medication_reminder",
+            "answer_mode": "direct_answer",
+            "time_scope": "none",
+            "completeness": "normal",
+            "context_sources": [],
+            "reminder": {"action": "create", "items": [{"text": "take medicine"}], "delete_ordinal": None, "confirmation": ""},
+        }
+        reminder = FakeReminderService()
+        reminder.result = ReminderInterception("Reminder recorded.")
+        service = ChatOnlyService(
+            ollama=FakeOllama(),
+            memory_service=memory,
+            delivery_service=FakeDeliveryService(),
+            settings=Settings(),
+            reminder_service=reminder,
+        )
+
+        await service.process_chat_request_result(
+            ChatRequest(text="remind me", user_id="test-user"),
+            "request-route",
+            callback_metadata={"target_channel": "telegram", "target_chat_id": "492198718"},
+            deliver=False,
+        )
+
+        self.assertEqual(
+            {"target_channel": "telegram", "target_chat_id": "492198718"},
+            reminder.delivery_routes[-1],
+        )
+
+    async def test_structured_confirmation_short_circuits_context_build(self) -> None:
+        memory = FakeMemoryService()
+        memory.raise_context = True
+        reminder = FakeReminderService()
+        reminder.result = ReminderInterception("Reminder confirmed.")
+        ollama = FakeOllama()
+        service = ChatOnlyService(
+            ollama=ollama, memory_service=memory, delivery_service=FakeDeliveryService(),
+            settings=Settings(), reminder_service=reminder,
+        )
+
+        result = await service.process_chat_request_result(
+            ChatRequest(
+                text="Yes",
+                user_id="test-user",
+                metadata={"reminder_id": 7, "delivery_id": "delivery-7"},
+            ),
+            "confirmation",
+            deliver=False,
+        )
+
+        self.assertEqual("Reminder confirmed.", result.answer)
+        self.assertEqual({}, memory.context_options)
+        self.assertEqual([], ollama.messages)
+        self.assertEqual([{}], reminder.contracts)
+        self.assertEqual("delivery-7", reminder.metadata[0]["delivery_id"])
 
     def test_dialogue_retrieval_applies_time_decay_after_similarity_filter(self) -> None:
         now = datetime.now().astimezone()
@@ -233,7 +465,7 @@ class ChatOnlyServiceTests(unittest.IsolatedAsyncioTestCase):
         result = await service.debug_memory_search(user_text="Test query", user_id="test-user")
 
         self.assertTrue(result["answer"])
-        self.assertEqual(5, result["message_count"])
+        self.assertEqual(6, result["message_count"])
         self.assertEqual(True, memory.context_options["force_semantic_dialogue"])
         self.assertEqual([], result["context"]["previous_turns"])
         self.assertEqual({}, memory.stored_turn)

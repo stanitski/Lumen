@@ -1,5 +1,81 @@
 # Lumen Change Log
 
+## 2026-07-22
+
+- Type: Model-driven Google Calendar event creation through Home Assistant
+- Changed files: `src/lumen/services/calendar_actions.py`, `src/lumen/services/memory.py`, `src/lumen/services/chat_only.py`, `src/lumen/main.py`, `src/lumen/config.py`, `.env.example`, focused tests, and architecture docs.
+- Reason: let an explicit user command create one timed or all-day event in the configured primary Google calendar without availability checks or intermediate persistence. Missing timed end uses the configured 60-minute duration; successful writes refresh the current-day reminder projection.
+- Runtime risk: medium. Writes are intentionally non-retrying; timeout returns an unknown result to avoid duplicates. Live verification should use an intentional real event rather than an automated test mutation.
+
+- Type: Home Assistant Google Calendar reminder projection
+- Changed files: `src/lumen/services/home_assistant_calendar.py`, `src/lumen/services/reminders.py`, `src/lumen/storage/db.py`, `src/lumen/main.py`, `src/lumen/config.py`, `.env.example`, focused tests, and root architecture docs.
+- Reason: read current-day Google Calendar events through Home Assistant REST/WebSocket and idempotently reuse the existing one-time reminder, Telegram confirmation, and 15-minute snooze flow. Timed events notify at their start; all-day events notify at configured 09:00 `Europe/Kyiv`.
+- Runtime risk: medium. Deployment requires schema `v33`, explicit calendar entity IDs and Telegram target chat ID, then a rebuilt/restarted runtime.
+
+## 2026-07-21
+
+- Type: Parent/child reminder snooze state machine
+- Changed files: `src/lumen/storage/db.py`, `src/lumen/services/reminders.py`, `CHANGELOG_LUMEN.md`, `DECISIONS.md`, `PROJECT_MAP.md`, `docs/CHAT_ONLY_RUNTIME_CONTRACT_UA.md`.
+- Reason: schema `v32` adds `parent_reminder_id`; recurring roots retain their original schedule while silence or `no` creates one inherited-route one-shot child at `+15` minutes. Child confirmation advances the root from its original schedule; list preserves root ordinals while showing the effective child due time.
+- Runtime risk: medium. Active child uniqueness and idempotent re-read prevent duplicate snoozes; terminal child delivery failure advances an eligible recurring root or fails a one-time/exhausted root, so no root remains silently `snoozed`.
+
+- Type: Reminder return-route and callback hardening
+- Changed files: `src/lumen/storage/db.py`, `src/lumen/services/reminders.py`, `src/lumen/services/chat_only.py`, `src/lumen/services/delivery.py`, `CHANGELOG_LUMEN.md`, `DECISIONS.md`, `PROJECT_MAP.md`, `docs/CHAT_ONLY_RUNTIME_CONTRACT_UA.md`.
+- Reason: persist the allowlisted Telegram return route from connector ingress in `delivery_route_json`, reuse it through `DeliveryService`, generate compact 32-hex correlated delivery IDs, and fail closed when a legacy row has no route.
+- Runtime risk: medium. Schema `v31` is applied on Lumen startup; rebuild and restart the packaged runtime before use. Existing route-less rows are not sent to a `user_id` fallback and retry at most with the bounded reminder delivery policy until an operator resolves their destination.
+
+## 2026-07-20
+
+- Type: Reminder noninterference in chat-only flow
+- Changed files: `src/lumen/services/chat_only.py`, `tests/test_chat_only_runtime.py`, `CHANGELOG_LUMEN.md`.
+- Reason: restore normal planner-context GetContract plus embedding flow for ordinary chat, keep structured reminder confirmations before context build, and remove reminder-specific final-prompt wording.
+- Runtime risk: low. Reminder create, list, ordinal cancellation, and delivery state transitions are unchanged.
+
+- Type: Reminder contract action/confirmation separation
+- Changed files: `src/lumen/services/memory.py`, `tests/test_query_contract.py`, `CHANGELOG_LUMEN.md`.
+- Reason: ignore a model-supplied confirmation when it also returns a reminder create, list, or ordinal-cancel action; clarify the multi-time daily reminder contract.
+- Runtime risk: low. Confirmation handling remains unchanged for `action=none`.
+
+- Type: GetContract-driven reminder create/list/cancel
+- Changed files: `src/lumen/services/memory.py`, `src/lumen/services/chat_only.py`, `src/lumen/services/reminders.py`, focused tests, `PROJECT_MAP.md`, `docs/CHAT_ONLY_RUNTIME_CONTRACT_UA.md`, `DECISIONS.md`, `CHANGELOG_LUMEN.md`.
+- Reason: one model contract now supplies structured reminder items, list action, displayed ordinal cancellation and plain confirmation; `ReminderService` retains only validation and state transitions. Delete-all support was removed.
+- Runtime risk: medium. A missing, stale, or state-changed in-memory list snapshot intentionally refuses ordinal cancellation until the user lists active reminders again.
+
+- Type: Scoped multi-reminder invalid-date guard
+- Changed files: `src/lumen/services/reminders.py`, `tests/test_reminders.py`, `CHANGELOG_LUMEN.md`.
+- Reason: keep invalid item dates inside indexed all-or-nothing validation when a request also has a scoped date.
+- Runtime risk: low. The guard does not alter valid scoped inheritance or transaction behavior.
+
+- Type: Multi-reminder parser and active-list corrective pass
+- Changed files: `src/lumen/services/reminders.py`, `tests/test_reminders.py`, `CHANGELOG_LUMEN.md`.
+- Reason: preserve explicit scoped date/recurrence overrides, validate invalid repeat-until dates without partial writes, distinguish list requests from action wording, and bound active-list output truthfully.
+- Runtime risk: low. Existing one-reminder, transaction, and wake semantics are unchanged.
+
+- Type: Atomic multi-reminder creation and active reminder list
+- Changed files: `src/lumen/services/reminders.py`, `tests/test_reminders.py`, `docs/CHAT_ONLY_RUNTIME_CONTRACT_UA.md`, `DECISIONS.md`, `CHANGELOG_LUMEN.md`.
+- Reason: create up to ten validated reminders from one request without partial writes, preserve shared actions with multiple times, and answer reminder-list requests from live SQLite rows rather than dialogue context.
+- Runtime risk: low. Unsupported or ambiguous multi-item wording now truthfully creates no rows and asks for clarification.
+
+- Type: Wake task PowerShell argument binding repair
+- Changed files: `src/lumen/services/reminder_wake.py`, `tests/test_reminders.py`, `CHANGELOG_LUMEN.md`.
+- Reason: encode a fully quoted PowerShell script instead of relying on `$args` after `-Command`, which does not receive subprocess-list values on this runtime.
+- Runtime risk: low. The registered task, principal, `WakeToRun`, `StartWhenAvailable`, and source/frozen working-directory behavior are unchanged.
+
+- Type: Packaged Kyiv timezone fallback
+- Changed files: `src/lumen/timezones.py`, `src/lumen/data/zoneinfo/Europe/Kyiv`, `src/lumen/services/reminders.py`, `src/lumen/storage/db.py`, `src/lumen/main.py`, `tests/test_timezones.py`, `CHANGELOG_LUMEN.md`.
+- Reason: bundle the IANA `Europe/Kyiv` TZif entry so source and PyInstaller one-file runtimes retain DST-aware reminder scheduling without an installed `tzdata` package.
+- Runtime risk: low. The bundled file is a single local IANA timezone asset; source runtime still prefers the operating-system timezone database.
+
+- Type: Reminder corrective pass
+- Changed files: local ignored `_ha_live_automations.yaml`, `src/lumen/main.py`, `src/lumen/services/reminders.py`, `src/lumen/services/reminder_wake.py`, `src/lumen/storage/db.py`, `src/lumen/memory/store.py`, `tests/test_reminders.py`, `tests/test_ollama_api.py`, `docs/CHAT_ONLY_RUNTIME_CONTRACT_UA.md`, `docs/LUMEN_ARCHITECTURE_GUIDE_UA.md`, `DECISIONS.md`, `CHANGELOG_LUMEN.md`.
+- Reason: correlate Telegram confirmation callbacks with `delivery_id`, align silence retry timing, isolate legacy store APIs, migrate compatible legacy rows, and avoid startup callback blocking.
+- Runtime risk: medium. Deployment must validate the current-user Windows task principal and apply the Home Assistant automation change before callbacks can confirm reminders.
+
+- Type: Isolated reminder service
+- Changed files: `src/lumen/storage/db.py`, `src/lumen/services/reminders.py`, `src/lumen/services/reminder_wake.py`, `src/lumen/reminder_wakeup.py`, `src/lumen/services/chat_only.py`, `src/lumen/main.py`, `tests/test_reminders.py`, `README.md`, `PROJECT_MAP.md`, `DECISIONS.md`, `CHANGELOG_LUMEN.md`.
+- Reason: restore persistent one-time/daily/weekly reminders with one Windows wake task, Home Assistant delivery, correlated confirmation, bounded delivery retries, and no planner/skills/tasks runtime.
+- Runtime risk: medium. The first deployment must verify Windows Task Scheduler permissions and the Home Assistant connector's structured `reminder_id`/`delivery_id` callback payload.
+
 ## 2026-07-20
 
 - Type: Documentation sync for current chat-only runtime
@@ -279,3 +355,8 @@
 - Changed files: `src/lumen/main.py`, `tests/test_ollama_api.py`
 - Reason: serialize `/api/chat` and `/api/generate` stream events as valid JSON Lines so Home Assistant's Ollama client can parse the response and complete Assist delivery.
 - Runtime risk: low, because only the wire serialization of existing stream payloads changed.
+
+- Type: Ollama GPU residency tuning
+- Changed files: `src/lumen/config.py`, `.env.example`
+- Reason: align the Lumen default and example keep-alive duration with the active five-minute policy, allowing inactive models to release VRAM sooner.
+- Runtime risk: low, because only cold-start latency after five idle minutes can increase.

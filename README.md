@@ -13,7 +13,7 @@ Current Lumen is a chat-memory-knowledge core. It supports:
 - bounded external context through `ContextExecutor`;
 - callback delivery through Home Assistant.
 
-Current Lumen does not run planner, skills, tasks, reminders, smart-home control, or scheduler logic in the active runtime.
+Current Lumen does not run planner, skills, tasks, or smart-home control. It has one isolated reminder integration with its own SQLite state, one Windows wake task, and Home Assistant delivery confirmation.
 
 ## Architecture
 
@@ -26,6 +26,8 @@ Current Lumen does not run planner, skills, tasks, reminders, smart-home control
 - `src/lumen/services/knowledge.py` handles knowledge upload and retrieval indexing.
 - `src/lumen/services/speech_to_text.py` transcribes connector audio and video attachments.
 - `src/lumen/services/delivery.py` posts final answers back through the Home Assistant callback contract.
+- `GetContract` owns natural-language reminder interpretation; `src/lumen/services/reminders.py` validates typed contracts and manages SQLite state transitions, delivery retries, and confirmation handling.
+- `src/lumen/services/reminder_wake.py` maintains the single nearest Windows wake task.
 - `src/lumen/memory/store.py` is the SQLite persistence layer.
 - `src/lumen/storage/db.py` defines the current schema and migrations.
 - `src/lumen/connectors/ollama.py` is the async Ollama client.
@@ -114,8 +116,7 @@ Current runtime behavior:
 These are not current runtime features:
 
 - planner-driven skill execution;
-- reminders and reminder delivery state machines;
-- scheduled tasks or wake timers;
+- planner-driven reminders or scheduled tasks;
 - smart-home device control;
 - policy-gated side-effect execution;
 - legacy broad Telegram ingestion or message persistence.

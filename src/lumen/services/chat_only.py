@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime
 
 from lumen.config import Settings
 from lumen.connectors.ollama import OllamaConnector
 from lumen.models import ChatRequest, ChatResult
 from lumen.services.delivery import DeliveryService
+from lumen.services.calendar_actions import CalendarActionResult, CalendarActionService
 from lumen.services.context_executor import ContextExecutor
 from lumen.services.memory import MemoryService
+from lumen.services.reminders import ReminderService, normalize_delivery_route
 
 
 class ChatOnlyService:
@@ -23,6 +26,8 @@ class ChatOnlyService:
         delivery_service: DeliveryService,
         settings: Settings,
         context_executor: ContextExecutor | None = None,
+        reminder_service: ReminderService | None = None,
+        calendar_action_service: CalendarActionService | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._ollama = ollama
@@ -30,6 +35,8 @@ class ChatOnlyService:
         self._delivery_service = delivery_service
         self._settings = settings
         self._context_executor = context_executor
+        self._reminder_service = reminder_service
+        self._calendar_action_service = calendar_action_service
         self._logger = logger or logging.getLogger("lumen")
 
     async def process_chat_request(self, payload: ChatRequest, request_id: str) -> None:
@@ -66,12 +73,33 @@ class ChatOnlyService:
     ) -> ChatResult:
         del include_supplemental_context_in_planning
         user_id = self._memory_service.resolve_user_id(payload)
+        delivery_route = self._reminder_delivery_route(callback_metadata)
+        structured_confirmation = (
+            payload.metadata.get("reminder_id") is not None
+            and payload.metadata.get("delivery_id") is not None
+        )
+        if structured_confirmation and self._reminder_service is not None:
+            reminder_interception = self._reminder_service.intercept_contract(
+                user_id=user_id,
+                contract={},
+                text=payload.text,
+                metadata=payload.metadata,
+                delivery_route=delivery_route,
+            )
+            if reminder_interception is not None:
+                return await self._reminder_result(
+                    request_id=request_id,
+                    user_id=user_id,
+                    answer=reminder_interception.answer,
+                    deliver=deliver,
+                    callback_metadata=callback_metadata,
+                )
         store_memory = user_id.casefold() != "global" and not self._memory_disabled(payload.metadata, callback_metadata)
         voice = False
         answer = ""
         execution_outcome = "ok"
         try:
-            answer = await self._generate_answer(
+            messages, context = await self._build_dialogue_messages(
                 user_text=payload.text,
                 user_id=user_id,
                 supplemental_context=supplemental_context,
@@ -80,6 +108,48 @@ class ChatOnlyService:
             execution_outcome = "error"
             answer = "Не вдалося сформувати відповідь. Спробуй, будь ласка, ще раз."
             self._logger.exception("Chat-only dialogue failed for request %s: %s", request_id, exc)
+        else:
+            query_contract = context.get("query_contract")
+            reminder_interception = (
+                self._reminder_service.intercept_contract(
+                    user_id=user_id,
+                    contract=query_contract if isinstance(query_contract, dict) else {},
+                    text=payload.text,
+                    metadata=payload.metadata,
+                    delivery_route=delivery_route,
+                )
+                if self._reminder_service is not None
+                else None
+            )
+            if reminder_interception is not None:
+                return await self._reminder_result(
+                    request_id=request_id,
+                    user_id=user_id,
+                    answer=reminder_interception.answer,
+                    deliver=deliver,
+                    callback_metadata=callback_metadata,
+                )
+            calendar_result = (
+                await self._calendar_action_service.execute(
+                    query_contract if isinstance(query_contract, dict) else {}
+                )
+                if self._calendar_action_service is not None
+                else None
+            )
+            if calendar_result is not None and calendar_result.status != "not_handled":
+                return await self._calendar_result(
+                    request_id=request_id,
+                    user_id=user_id,
+                    result=calendar_result,
+                    deliver=deliver,
+                    callback_metadata=callback_metadata,
+                )
+            try:
+                answer = await self._generate_answer(messages)
+            except Exception as exc:
+                execution_outcome = "error"
+                answer = "Не вдалося сформувати відповідь. Спробуй, будь ласка, ще раз."
+                self._logger.exception("Chat-only dialogue failed for request %s: %s", request_id, exc)
 
         persistence_outcome = "skipped"
         metadata = dict(callback_metadata or {})
@@ -141,12 +211,119 @@ class ChatOnlyService:
             metadata=metadata,
         )
 
-    async def _generate_answer(self, *, user_text: str, user_id: str, supplemental_context: str = "") -> str:
-        messages, _ = await self._build_dialogue_messages(
-            user_text=user_text,
+    async def _reminder_result(
+        self,
+        *,
+        request_id: str,
+        user_id: str,
+        answer: str,
+        deliver: bool,
+        callback_metadata: dict[str, object] | None,
+    ) -> ChatResult:
+        delivered = False
+        delivery_outcome = "inline" if not deliver else "not_attempted"
+        metadata = dict(callback_metadata or {})
+        if deliver:
+            try:
+                await self._delivery_service.deliver_chat_answer(
+                    request_id=request_id,
+                    user_id=user_id,
+                    answer=answer,
+                    voice=False,
+                    metadata=callback_metadata,
+                )
+                delivered = True
+                delivery_outcome = "delivered"
+            except Exception as exc:
+                delivery_outcome = "failed"
+                metadata["delivery_error"] = str(exc).strip() or exc.__class__.__name__
+                self._logger.exception("Reminder chat acknowledgement delivery failed request=%s: %s", request_id, exc)
+        return ChatResult(
+            request_id=request_id,
             user_id=user_id,
-            supplemental_context=supplemental_context,
+            answer=answer,
+            delivered=delivered,
+            persistence_outcome="skipped",
+            delivery_outcome=delivery_outcome,
+            metadata=metadata,
         )
+
+    async def _calendar_result(
+        self,
+        *,
+        request_id: str,
+        user_id: str,
+        result: CalendarActionResult,
+        deliver: bool,
+        callback_metadata: dict[str, object] | None,
+    ) -> ChatResult:
+        answer = self._calendar_result_text(result)
+        delivered = False
+        delivery_outcome = "inline" if not deliver else "not_attempted"
+        metadata = dict(callback_metadata or {})
+        metadata["calendar_action_status"] = result.status
+        if deliver:
+            try:
+                await self._delivery_service.deliver_chat_answer(
+                    request_id=request_id,
+                    user_id=user_id,
+                    answer=answer,
+                    voice=False,
+                    metadata=callback_metadata,
+                )
+                delivered = True
+                delivery_outcome = "delivered"
+            except Exception as exc:
+                delivery_outcome = "failed"
+                metadata["delivery_error"] = str(exc).strip() or exc.__class__.__name__
+                self._logger.exception("Calendar action acknowledgement delivery failed request=%s: %s", request_id, exc)
+        return ChatResult(
+            request_id=request_id,
+            user_id=user_id,
+            answer=answer,
+            delivered=delivered,
+            execution_outcome="ok" if result.succeeded else "error",
+            persistence_outcome="skipped",
+            delivery_outcome=delivery_outcome,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _calendar_result_text(result: CalendarActionResult) -> str:
+        if result.status == "created" and result.request is not None:
+            request = result.request
+            if request.all_day and isinstance(request.start, date):
+                when = request.start.strftime("%d.%m.%Y, увесь день")
+            elif isinstance(request.start, datetime) and isinstance(request.end, datetime):
+                when = (
+                    f"{request.start.strftime('%d.%m.%Y %H:%M')}–"
+                    f"{request.end.strftime('%H:%M')}"
+                )
+            else:
+                when = str(request.start)
+            answer = f"Подію додано до календаря: {request.summary}, {when}."
+            if result.refresh_succeeded is False:
+                answer += " Оновлення календарних нагадувань не підтвердилося; повторно подію не створюю."
+            return answer
+        if result.status == "unknown":
+            return "Не вдалося підтвердити, чи подію створено. Автоматично не повторюю запит, щоб не створити дублікат."
+        if result.status == "failed":
+            return "Home Assistant відхилив створення події. Подію не додано."
+        return "Не вдалося створити подію: дані події некоректні."
+
+    @staticmethod
+    def _reminder_delivery_route(callback_metadata: dict[str, object] | None) -> dict[str, str] | None:
+        if not isinstance(callback_metadata, dict):
+            return None
+        return normalize_delivery_route(
+            {
+                key: callback_metadata[key]
+                for key in ("target_channel", "target_chat_id")
+                if key in callback_metadata
+            }
+        )
+
+    async def _generate_answer(self, messages: list[dict[str, str]]) -> str:
         payload = await self._ollama.chat(messages=messages, model=self._settings.ollama_dialogue_model or None)
         answer = str(payload.get("message", {}).get("content", "")).strip()
         return answer or "Не зміг сформувати відповідь. Спробуй, будь ласка, перефразувати запит."

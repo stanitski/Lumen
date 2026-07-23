@@ -25,6 +25,10 @@ class MemoryStore:
     def __init__(self, session_factory) -> None:
         self._session_factory = session_factory
 
+    @staticmethod
+    def _legacy_reminders_disabled() -> None:
+        raise RuntimeError("Legacy MemoryStore reminder APIs are disabled; use ReminderService.")
+
     def upsert_intent(self, intent: IntentRecord) -> None:
         with self._session_factory() as connection:
             connection.execute(
@@ -1440,7 +1444,6 @@ class MemoryStore:
             "conversation_turns",
             "memory_facts",
             "memory_embeddings",
-            "reminders",
             "knowledge_upload_sessions",
         ]
         placeholders = ", ".join("?" for _ in normalized_old_user_ids)
@@ -1721,6 +1724,7 @@ class MemoryStore:
         sent_at: str | None = None,
         metadata: dict[str, object] | None = None,
     ) -> int:
+        self._legacy_reminders_disabled()
         created_at = created_at or local_now_iso()
         with self._session_factory() as connection:
             cursor = connection.execute(
@@ -1754,6 +1758,7 @@ class MemoryStore:
         status: str | None = None,
         limit: int = 100,
     ) -> list[ReminderRecord]:
+        self._legacy_reminders_disabled()
         safe_limit = max(1, min(limit, 500))
         params: list[object] = [user_id]
         sql = """
@@ -1772,6 +1777,7 @@ class MemoryStore:
         return [self._row_to_reminder(row) for row in rows]
 
     def due_reminders(self, *, limit: int = 100, now: datetime | None = None) -> list[ReminderRecord]:
+        self._legacy_reminders_disabled()
         safe_limit = max(1, min(limit, 500))
         cutoff = (now or datetime.now().astimezone()).isoformat()
         with self._session_factory() as connection:
@@ -1793,6 +1799,7 @@ class MemoryStore:
         return [self._row_to_reminder(row) for row in rows]
 
     def awaiting_confirmation_reminders(self, *, limit: int = 500) -> list[ReminderRecord]:
+        self._legacy_reminders_disabled()
         safe_limit = max(1, min(limit, 1000))
         with self._session_factory() as connection:
             rows = connection.execute(
@@ -1809,6 +1816,7 @@ class MemoryStore:
         return [self._row_to_reminder(row) for row in rows]
 
     def next_pending_reminder_due_at(self) -> str | None:
+        self._legacy_reminders_disabled()
         with self._session_factory() as connection:
             row = connection.execute(
                 """
@@ -1824,6 +1832,7 @@ class MemoryStore:
         return str(row["due_at"]) if row and row["due_at"] else None
 
     def mark_reminder_sent(self, reminder_id: int, *, user_id: str, sent_at: str | None = None) -> dict | None:
+        self._legacy_reminders_disabled()
         return self.set_reminder_status(reminder_id, user_id=user_id, status="sent", sent_at=sent_at)
 
     def set_reminder_status(
@@ -1836,6 +1845,7 @@ class MemoryStore:
         due_at: str | None = None,
         metadata: dict[str, object] | None = None,
     ) -> dict | None:
+        self._legacy_reminders_disabled()
         sent_at = sent_at or local_now_iso()
         with self._session_factory() as connection:
             if due_at is None and metadata is None:
@@ -1889,15 +1899,18 @@ class MemoryStore:
         return self._row_to_reminder_dict(row) if row else None
 
     def cancel_reminder(self, reminder_id: int, *, user_id: str) -> bool:
+        self._legacy_reminders_disabled()
         return self.set_reminder_status(reminder_id, user_id=user_id, status="cancelled") is not None
 
     def delete_reminder(self, reminder_id: int, *, user_id: str) -> bool:
+        self._legacy_reminders_disabled()
         with self._session_factory() as connection:
             cursor = connection.execute("DELETE FROM reminders WHERE user_id = ? AND id = ?", (user_id, reminder_id))
             connection.commit()
             return cursor.rowcount > 0
 
     def get_reminder(self, reminder_id: int, *, user_id: str) -> ReminderRecord | None:
+        self._legacy_reminders_disabled()
         with self._session_factory() as connection:
             row = connection.execute(
                 """
@@ -1911,6 +1924,7 @@ class MemoryStore:
         return self._row_to_reminder(row) if row else None
 
     def get_reminder_by_source_ref(self, *, user_id: str, source_ref: str) -> ReminderRecord | None:
+        self._legacy_reminders_disabled()
         with self._session_factory() as connection:
             row = connection.execute(
                 """

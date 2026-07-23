@@ -2,9 +2,9 @@
 
 ## Статус документа
 
-Це короткий актуальний гід по поточній версії Lumen. Джерело істини тут: `src/lumen/main.py`, `src/lumen/services/chat_only.py`, `src/lumen/services/memory.py`, `src/lumen/services/knowledge.py`, `src/lumen/services/delivery.py`, `src/lumen/services/speech_to_text.py`.
+Це короткий актуальний гід по поточній версії Lumen. Джерело істини тут: `src/lumen/main.py`, `src/lumen/services/chat_only.py`, `src/lumen/services/reminders.py`, `src/lumen/services/memory.py`, `src/lumen/services/knowledge.py`, `src/lumen/services/delivery.py`, `src/lumen/services/speech_to_text.py`.
 
-Старі planner/skills/tasks/reminder docs не описують поточний runtime, якщо не позначені як historical або target-state.
+Старі planner/skills/tasks/reminder docs не описують поточний runtime. Поточний reminder contract описує лише ізольований `ReminderService`.
 
 ## 1. Що таке поточний Lumen
 
@@ -16,6 +16,7 @@ Lumen це локальний FastAPI-сервіс, який:
 - робить один основний Ollama dialogue call;
 - зберігає turn і post-process memory;
 - доставляє фінальну відповідь через Home Assistant callback або повертає її inline.
+- записує та доставляє ізольовані reminders без planner/skills/tasks.
 
 Практично це chat-memory-knowledge core, а не automation runtime.
 
@@ -29,9 +30,10 @@ Lumen це локальний FastAPI-сервіс, який:
 4. `ChatOnlyService` збирає retrieval context через `MemoryService`.
 5. `ContextExecutor` за потреби додає temporary Telegram/web/other read-only context.
 6. `OllamaConnector` генерує фінальну відповідь.
-7. Turn зберігається в SQLite.
-8. `MemoryService` робить post-processing.
-9. `DeliveryService` доставляє відповідь через Home Assistant, якщо це async path.
+7. Reminder intent або structured reminder confirmation обробляється `ReminderService` до Ollama; звичайний chat продовжується без змін.
+8. Turn зберігається в SQLite.
+9. `MemoryService` робить post-processing.
+10. `DeliveryService` доставляє відповідь через Home Assistant, якщо це async path.
 
 ## 3. Основні модулі
 
@@ -189,7 +191,6 @@ Lumen це локальний FastAPI-сервіс, який:
 - `PlanExecutionService`
 - `ActionExecutor`
 - `TaskScheduler`
-- `ReminderService`
 - `smart_home_control` runtime path
 
 Ці назви можуть лишатися в історичних документах, changelog або старому коді, але вони не описують поточну головну execution path.
@@ -231,18 +232,11 @@ Lumen це локальний FastAPI-сервіс, який:
 ## 6. Що важливо не припускати
 
 - що planner обирає skill;
-- що reminders/tasks десь “все ще активні”;
+- що старі planner/tasks runtime paths активні;
 - що smart-home control є live runtime feature;
 - що Telegram messages зберігаються в пам'ять як chat history;
 - що knowledge upload і ordinary dialogue memory це одна й та сама підсистема.
 
-## 7. Якщо колись повертати reminders
+## 7. Reminders
 
-Поточна документація має виходити з того, що reminders зараз вимкнені.
-
-Якщо їх повертати пізніше, безпечний напрямок такий:
-
-- окрема integration;
-- явний API/contract;
-- окремі focused tests;
-- без відродження всього старого planner/skills/tasks stack одним пакетом.
+`ReminderService` зберігає one-time, daily та weekly occurrence у власній SQLite схемі. Він створює одну Windows wake task на найближчий due або confirmation deadline, доставляє reminder через Home Assistant та приймає лише корельоване підтвердження `reminder_confirmed:<id>:<delivery_id>`. Старий callback без `delivery_id` відхиляється, бо не може безпечно завершити occurrence.
