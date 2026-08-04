@@ -1,5 +1,10 @@
 # Lumen Debugging Playbook
 
+> **Статус: historical, замінено.** Посилання нижче на `chat.py`,
+> `skills/planner.py` і `tasks/executor.py` не існують у live runtime.
+> Використовуй `docs/DEBUGGING.md`. Старий текст збережено для аналізу
+> попередньої архітектури.
+
 Практичний playbook для діагностики:
 
 - wrong answers

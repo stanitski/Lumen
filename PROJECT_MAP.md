@@ -20,7 +20,9 @@ Lumen is a local FastAPI assistant with one active runtime: chat, memory, knowle
 2. `POST /connector` accepts text or STT-supported attachments.
 3. Audio/video attachments are normalized with `ffmpeg`, transcribed by `faster-whisper`, then routed into the same text chat path.
 4. `MemoryService` retrieves relevant facts, dialogue evidence, and knowledge evidence and builds a query contract.
-5. `ContextExecutor` validates and dispatches optional read-only requests for `telegram`, `web`, `home_assistant`, and `knowledge`.
+5. `ContextExecutor` validates optional read-only requests. Telegram and web
+   handlers are live; generic Home Assistant state and contract-requested
+   knowledge handlers still return `pending_implementation`.
 6. `GetContract` класифікує reminder create/list/cancel-list-item; `ReminderService` зберігає root schedule та one-shot snooze children у SQLite, використовує `DeliveryService` і один nearest Windows wake task.
 7. Під час створення reminder з connector ingress зберігається лише allowlisted Telegram return route; scheduled delivery повторно використовує його, а не `user_id`.
 8. `HomeAssistantCalendarClient` читає поточний день через HA Calendar REST, слухає `calendar/event/subscribe` через HA WebSocket і проєктує Google Calendar occurrences в одноразові SQLite reminders; all-day події отримують `due_at` о 09:00 `Europe/Kyiv`.

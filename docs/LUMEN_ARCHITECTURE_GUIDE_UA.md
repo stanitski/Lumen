@@ -94,6 +94,11 @@ Lumen це локальний FastAPI-сервіс, який:
 - dispatch на Telegram, web, Home Assistant, knowledge handlers;
 - форматування external context у prompt-friendly shape.
 
+Поточний статус: Telegram і web handlers реалізовані; generic Home Assistant
+state та contract-requested knowledge handlers повертають
+`pending_implementation`. Ordinary knowledge retrieval працює через
+`MemoryService`.
+
 Коли дивитися сюди:
 
 - Lumen каже, що “подивився” щось зовнішнє, але evidence не сходиться;

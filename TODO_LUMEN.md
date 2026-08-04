@@ -16,6 +16,9 @@
 
 - Run live checks for dialogue retrieval, stable-fact extraction, knowledge upload, and Ollama-compatible endpoints.
 - Simplify remaining legacy-only code inside `models.py`, `memory/store.py`, and `memory.py` in a separately reviewed pass.
+- Resolve the `StarletteDeprecationWarning` emitted by `fastapi.testclient`
+  against the installed `httpx`; do not install or migrate dependencies without
+  a separately scoped compatibility check.
 
 ## Later
 

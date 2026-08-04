@@ -1,5 +1,10 @@
 # Nutrition Activity Handoff
 
+> **Статус: historical.** Описаний `nutrition_tracking`/`nutrition_summary`
+> skill runtime видалено з поточного Lumen. Файли `src/lumen/tasks/executor.py`
+> і відповідний test більше не існують. Поточні межі дивись у
+> `docs/PROJECT.md` та `docs/HANDOVER.md`.
+
 ## What changed
 
 - `nutrition_tracking` recognizes workouts and explicitly burned calories as physical activity.

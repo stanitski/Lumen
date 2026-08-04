@@ -63,6 +63,15 @@ Lumen can request bounded read-only context before the final answer. The current
 - `home_assistant/read_state`
 - `knowledge/search`
 
+Implementation status:
+
+- `telegram/search` and `web/search` have live adapters;
+- `home_assistant/read_state` and contract-requested `knowledge/search` return
+  `pending_implementation`;
+- ordinary knowledge retrieval is active through
+  `MemoryService.build_planner_context(...)`, independently of the pending
+  `ContextExecutor` handler.
+
 Rules:
 
 - external context is temporary prompt context, not persisted imported content;

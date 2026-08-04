@@ -21,6 +21,27 @@ Main runtime shape:
 - Delivery: `src/lumen/services/delivery.py`
 - SQLite schema and persistence: `src/lumen/storage/`, `src/lumen/memory/`
 
+## Start here
+
+Read in this order before making a non-trivial change:
+
+1. `docs/AI_CONTEXT.md`
+2. `docs/ONBOARDING_AI.md`
+3. `docs/PROJECT.md`
+4. `docs/ARCHITECTURE.md`
+5. the directly affected module from `docs/MODULES.md`
+6. `docs/HANDOVER.md`, `docs/ROADMAP.md`, and `docs/DEBUGGING.md` when relevant
+7. the live entry point and the complete affected flow in code
+
+`src/lumen/main.py`, imported runtime services, `src/lumen/storage/db.py`, tests, and
+the current Git branch are the source of truth. Documentation is an orientation
+aid and must be checked against code.
+
+Do not infer an active subsystem from names in `CHANGELOG_LUMEN.md`,
+`DECISIONS.md`, historical documents, `src/lumen/models.py`,
+`src/lumen/memory/store.py`, or `src/lumen/data/*.json`. Confirm that the
+subsystem is imported and wired from `src/lumen/main.py`.
+
 ## Before editing code
 
 - Read the current task carefully and keep responses short.
@@ -28,6 +49,8 @@ Main runtime shape:
 - If more than 3 files seem necessary, stop and explain why before editing.
 - Prefer live code over older docs when they disagree.
 - Inspect only the minimum paths needed for the task.
+- Trace imports and callers before declaring a component active, duplicated,
+  obsolete, or dead.
 - For runtime behavior, start from the likely entry point and trace one flow end to end.
 - For database questions, inspect `src/lumen/storage/db.py` and the directly related service/store code before assuming schema behavior.
 - Do not show full diffs unless requested.
@@ -48,6 +71,10 @@ Main runtime shape:
 - Minimize token usage.
 - Do not scan the whole repository unless explicitly asked.
 - Ignore large/generated areas unless the task directly depends on them.
+- Normally ignore `.git/`, `.venv/`, `build/`, `dist/`, `__pycache__/`,
+  `data/backups/`, local databases, Telegram sessions, debug dumps, and
+  `archive/`. Inspect them only when the task explicitly requires runtime,
+  packaging, migration, or historical evidence.
 - Prefer targeted reads with exact file paths and narrow searches.
 - Summarize structure instead of dumping long listings.
 - Use `TBD` instead of guessing.
@@ -63,6 +90,9 @@ Main runtime shape:
 - Do not run destructive commands.
 - Do not revert user changes.
 - Do not expose secrets from `.env`, local databases, or integration credentials.
+- Do not treat `docs/TARGET_EXECUTION_*.md`, `LUMEN_DEBUG_GUIDE.md`,
+  `LUMEN_DEBUGGING_PLAYBOOK.md`, or `LUMEN_NUTRITION_ACTIVITY_HANDOFF.md` as
+  current runtime documentation; their status headers point to replacements.
 
 ## Testing and manual checking
 
@@ -70,6 +100,8 @@ Main runtime shape:
 - In this repo, prefer `python -m unittest ...` over `pytest` unless the user asks otherwise and the environment supports it.
 - For syntax-only safety, use a narrow compile check when useful.
 - For API flow changes, verify the directly affected endpoint or service path only.
+- For documentation changes, verify referenced paths/symbols, search for stale
+  architecture names, and confirm that no runtime files changed.
 - If verification was not run, say so clearly.
 
 ## Documentation rules

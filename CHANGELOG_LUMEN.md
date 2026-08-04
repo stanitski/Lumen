@@ -1,5 +1,27 @@
 # Lumen Change Log
 
+## 2026-07-23
+
+- Type: Token-efficient local AI context
+- Changed files: `docs/AI_CONTEXT.md`, `AGENTS.md`,
+  `docs/ONBOARDING_AI.md`, `CHANGELOG_LUMEN.md`
+- Reason: add a concise, live-code-grounded context document for local agents
+  and place it immediately after `AGENTS.md` in the onboarding order.
+- Runtime risk: none; documentation-only change.
+
+- Type: Current architecture knowledge-transfer package
+- Changed files: `AGENTS.md`, `docs/PROJECT.md`, `docs/ARCHITECTURE.md`,
+  `docs/MODULES.md`, `docs/ONBOARDING_AI.md`, `docs/HANDOVER.md`,
+  `docs/CONVENTIONS.md`, `docs/DECISIONS.md`, `docs/DEBUGGING.md`,
+  `docs/ROADMAP.md`, `README.md`, `PROJECT_MAP.md`, `TODO_LUMEN.md`,
+  current contract docs, historical status headers, and
+  `docs/env.local.example`
+- Reason: document the live `ChatOnlyService` runtime, isolated
+  reminder/calendar integrations, persistence/external contracts, confirmed
+  legacy residue, debugging path, and current handover without treating old
+  planner/skills/tasks material as active.
+- Runtime risk: none; documentation-only change.
+
 ## 2026-07-22
 
 - Type: Model-driven Google Calendar event creation through Home Assistant

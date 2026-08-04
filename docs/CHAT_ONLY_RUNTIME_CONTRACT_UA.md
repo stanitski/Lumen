@@ -38,12 +38,17 @@
 
 ## Контракт зовнішнього контексту
 
-`ContextExecutor` виконує лише read-only context requests:
+`ContextExecutor` приймає лише read-only context requests:
 
 - `telegram/search`
 - `web/search`
 - `home_assistant/read_state`
 - `knowledge/search`
+
+`telegram/search` і `web/search` реалізовані. `home_assistant/read_state` та
+contract-requested `knowledge/search` повертають `pending_implementation`.
+Звичайний knowledge retrieval активний окремо через
+`MemoryService.build_planner_context()`.
 
 Правила:
 
@@ -76,7 +81,10 @@ Attachment path:
 - delivery failure не має переписувати semantic answer, лише фіксується окремо в result metadata/logs.
 - reminder delivery є at-least-once, має `reminder_id` і cryptographically random 32-hex `delivery_id`, щоб `reminder_confirmed:<reminder_id>:<delivery_id>` помістився в Telegram callback limit; Home Assistant button передає обидва поля, а ingress передає їх у `/connector` для exact correlated confirmation.
 
-Operator note: після оновлення потрібно rebuild і restart Lumen, щоб застосувалась SQLite schema `v32`. Не backfill-ити `delivery_route_json` за `user_id`; legacy rows потребують явного підтвердженого route або залишаються fail-closed.
+Operator note: після оновлення потрібно rebuild і restart Lumen, щоб
+застосувалась SQLite schema `v33`. Не backfill-ити `delivery_route_json` за
+`user_id`; legacy rows потребують явного підтвердженого route або залишаються
+fail-closed.
 
 ## Правило повторного розширення
 
