@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     ollama_model: str = "gemma4:e4b"
     ollama_dialogue_model: str = ""
     ollama_embedding_model: str = "embeddinggemma"
-    ollama_timeout_seconds: float = 120.0
+    ollama_timeout_seconds: float = 240.0
     ollama_client_keep_alive: str = "5m"
     ollama_debug_dump_path: str = "./data/debug/last_ollama_request.json"
     ollama_compat_user_id: str = ""
