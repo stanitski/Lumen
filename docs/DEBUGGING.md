@@ -45,6 +45,12 @@ batch launcher до окремої live перевірки.
 - public values: `.env.example`;
 - secrets: `.env` не друкувати.
 
+Для final dialogue перевіряти lifecycle log `Ollama stream`: `request`, `model`,
+`elapsed_ms`, `first_frame_ms`, `frames`, `chars`, `outcome`. Відсутній
+`first_frame_ms` означає, що Ollama ще не віддала перший observable кадр;
+під час prompt evaluation Lumen не має окремого progress signal. Після першого
+кадру `idle_timeout` означає 240 секунд без нового валідного NDJSON frame.
+
 Перевірити, що source і executable резолвлять той самий `PROJECT_ROOT`,
 DB/log paths та `.env`.
 
@@ -54,6 +60,7 @@ DB/log paths та `.env`.
 |---|---|
 | `202`, але немає відповіді | background task logs; `ChatOnlyService`; `DeliveryService` |
 | Inline API має іншу відповідь | `/api/chat`/`/api/generate` adapter і `deliver=False` |
+| Inline API повернув `504 Ollama stream stalled` | lifecycle log; час першого кадру; пауза між NDJSON frames |
 | Відповідь не пам’ятає факт | `build_planner_context()`, selected facts, retrieval policy |
 | Старий діалог домінує | semantic/lexical candidates, previous-turn anchor, debug-search |
 | Knowledge upload є, retrieval нема | `KnowledgeService`, `memory_embeddings`, knowledge hit thresholds |

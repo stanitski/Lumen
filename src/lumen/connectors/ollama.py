@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, AsyncIterator, Literal
 
 import httpx
 
@@ -15,6 +18,15 @@ from lumen.time_utils import local_now
 
 
 OllamaModality = Literal["text", "image", "audio"]
+_LOGGER = logging.getLogger("lumen")
+
+
+class OllamaStreamProtocolError(RuntimeError):
+    """Ollama returned an invalid or incomplete NDJSON chat stream."""
+
+
+class OllamaStreamIdleTimeout(TimeoutError):
+    """Ollama stopped producing valid NDJSON frames after stream progress."""
 
 
 @dataclass
@@ -154,6 +166,184 @@ class OllamaConnector:
         )
         return response_json
 
+    async def stream_chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model: str | None = None,
+        idle_timeout_seconds: float,
+        request_id: str = "",
+    ) -> AsyncIterator[str]:
+        """Yield final-dialogue content deltas from Ollama's NDJSON chat stream.
+
+        The first valid frame intentionally has no deadline: Ollama does not
+        expose prompt-evaluation progress.  Once any valid frame arrives,
+        every subsequent frame must arrive within ``idle_timeout_seconds``.
+        Empty and thinking-only frames still reset that watchdog.
+        """
+        if idle_timeout_seconds <= 0:
+            raise ValueError("idle_timeout_seconds must be greater than zero")
+
+        multimodal_messages = [
+            OllamaMessage(
+                role=str(message.get("role", "user")).strip() or "user",
+                content=str(message.get("content", "")),
+            )
+            for message in messages
+        ]
+        payload: dict[str, Any] = {
+            "model": model or self.model,
+            "messages": [
+                self._serialize_message(message)
+                for message in self._with_runtime_context(multimodal_messages)
+            ],
+            "stream": True,
+            "keep_alive": self.keep_alive,
+        }
+        response = None
+        started_at = time.perf_counter()
+        first_frame_ms: int | None = None
+        received_frame = False
+        done = False
+        frame_count = 0
+        content_parts: list[str] = []
+        stream_timeout = httpx.Timeout(
+            connect=self.timeout_seconds,
+            read=None,
+            write=self.timeout_seconds,
+            pool=self.timeout_seconds,
+        )
+        try:
+            async with httpx.AsyncClient(base_url=self.base_url.rstrip("/"), timeout=stream_timeout) as client:
+                async with client.stream("POST", "/api/chat", json=payload) as response:
+                    response.raise_for_status()
+                    line_iterator = response.aiter_lines()
+                    while True:
+                        try:
+                            if received_frame:
+                                async with asyncio.timeout(idle_timeout_seconds):
+                                    line = await anext(line_iterator)
+                            else:
+                                line = await anext(line_iterator)
+                        except StopAsyncIteration:
+                            break
+                        except TimeoutError as exc:
+                            raise OllamaStreamIdleTimeout(
+                                f"Ollama chat stream was idle for {idle_timeout_seconds:g} seconds after progress."
+                            ) from exc
+
+                        if not line.strip():
+                            continue
+                        try:
+                            frame = json.loads(line)
+                        except json.JSONDecodeError as exc:
+                            raise OllamaStreamProtocolError("Ollama chat stream contains invalid JSON.") from exc
+                        if not isinstance(frame, dict):
+                            raise OllamaStreamProtocolError("Ollama chat stream frame must be a JSON object.")
+                        if frame.get("error"):
+                            raise OllamaStreamProtocolError(f"Ollama chat stream returned an error: {frame['error']}")
+
+                        # A valid frame, even without content, proves that the
+                        # upstream inference is still making observable progress.
+                        if first_frame_ms is None:
+                            first_frame_ms = round((time.perf_counter() - started_at) * 1000)
+                        received_frame = True
+                        frame_count += 1
+                        message = frame.get("message")
+                        if message is not None and not isinstance(message, dict):
+                            raise OllamaStreamProtocolError("Ollama chat stream message must be a JSON object.")
+                        content = "" if message is None else message.get("content", "")
+                        if not isinstance(content, str):
+                            raise OllamaStreamProtocolError("Ollama chat stream message content must be text.")
+                        if content:
+                            content_parts.append(content)
+                            yield content
+                        if frame.get("done") is True:
+                            done = True
+                            break
+        except asyncio.CancelledError:
+            _LOGGER.info(
+                "Ollama stream request=%s model=%s elapsed_ms=%d first_frame_ms=%s frames=%d chars=%d outcome=cancelled",
+                request_id,
+                payload["model"],
+                round((time.perf_counter() - started_at) * 1000),
+                first_frame_ms,
+                frame_count,
+                sum(len(part) for part in content_parts),
+            )
+            raise
+        except Exception as exc:
+            outcome = (
+                "idle_timeout"
+                if isinstance(exc, OllamaStreamIdleTimeout)
+                else "protocol_error"
+                if isinstance(exc, OllamaStreamProtocolError)
+                else "transport_error"
+            )
+            _LOGGER.warning(
+                "Ollama stream request=%s model=%s elapsed_ms=%d first_frame_ms=%s frames=%d chars=%d outcome=%s",
+                request_id,
+                payload["model"],
+                round((time.perf_counter() - started_at) * 1000),
+                first_frame_ms,
+                frame_count,
+                sum(len(part) for part in content_parts),
+                outcome,
+            )
+            self._dump_debug_payload(
+                {
+                    "kind": "stream_chat",
+                    "request": payload,
+                    "response": self._stream_response_payload(response),
+                    "frames_received": frame_count,
+                    "content_received": "".join(content_parts),
+                    "done": done,
+                    "error": repr(exc),
+                }
+            )
+            raise
+
+        if not done:
+            error = OllamaStreamProtocolError("Ollama chat stream ended before its terminal done frame.")
+            _LOGGER.warning(
+                "Ollama stream request=%s model=%s elapsed_ms=%d first_frame_ms=%s frames=%d chars=%d outcome=protocol_error",
+                request_id,
+                payload["model"],
+                round((time.perf_counter() - started_at) * 1000),
+                first_frame_ms,
+                frame_count,
+                sum(len(part) for part in content_parts),
+            )
+            self._dump_debug_payload(
+                {
+                    "kind": "stream_chat",
+                    "request": payload,
+                    "response": self._stream_response_payload(response),
+                    "frames_received": frame_count,
+                    "content_received": "".join(content_parts),
+                    "done": False,
+                    "error": repr(error),
+                }
+            )
+            raise error
+
+        _LOGGER.info(
+            "Ollama stream request=%s model=%s elapsed_ms=%d first_frame_ms=%s frames=%d chars=%d outcome=completed",
+            request_id,
+            payload["model"],
+            round((time.perf_counter() - started_at) * 1000),
+            first_frame_ms,
+            frame_count,
+            sum(len(part) for part in content_parts),
+        )
+        self._dump_debug_payload(
+            {
+                "kind": "stream_chat",
+                "request": payload,
+                "response": {"frames_received": frame_count, "content": "".join(content_parts), "done": True},
+            }
+        )
+
     async def embed(
         self,
         input: str | list[str],
@@ -206,6 +396,12 @@ class OllamaConnector:
             "status_code": response.status_code,
             "body": body,
         }
+
+    @staticmethod
+    def _stream_response_payload(response: httpx.Response | None) -> dict[str, Any] | None:
+        if response is None:
+            return None
+        return {"status_code": response.status_code}
 
     def _serialize_message(self, message: OllamaMessage) -> dict[str, Any]:
         content_parts: list[str] = []

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime
 
 from lumen.config import Settings
-from lumen.connectors.ollama import OllamaConnector
+from lumen.connectors.ollama import OllamaConnector, OllamaStreamIdleTimeout
 from lumen.models import ChatRequest, ChatResult
 from lumen.services.delivery import DeliveryService
 from lumen.services.calendar_actions import CalendarActionResult, CalendarActionService
@@ -28,6 +29,7 @@ class ChatOnlyService:
         context_executor: ContextExecutor | None = None,
         reminder_service: ReminderService | None = None,
         calendar_action_service: CalendarActionService | None = None,
+        ollama_stream_idle_timeout_seconds: float = 240.0,
         logger: logging.Logger | None = None,
     ) -> None:
         self._ollama = ollama
@@ -37,6 +39,7 @@ class ChatOnlyService:
         self._context_executor = context_executor
         self._reminder_service = reminder_service
         self._calendar_action_service = calendar_action_service
+        self._ollama_stream_idle_timeout_seconds = ollama_stream_idle_timeout_seconds
         self._logger = logger or logging.getLogger("lumen")
 
     async def process_chat_request(self, payload: ChatRequest, request_id: str) -> None:
@@ -145,7 +148,20 @@ class ChatOnlyService:
                     callback_metadata=callback_metadata,
                 )
             try:
-                answer = await self._generate_answer(messages)
+                answer = await self._generate_answer(messages, request_id=request_id)
+            except OllamaStreamIdleTimeout:
+                self._logger.warning("Chat-only dialogue stream became idle request=%s", request_id)
+                return ChatResult(
+                    request_id=request_id,
+                    user_id=user_id,
+                    answer="",
+                    execution_outcome="cancelled_idle",
+                    persistence_outcome="skipped",
+                    delivery_outcome="suppressed",
+                    metadata={"outcome": "cancelled_idle"},
+                )
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 execution_outcome = "error"
                 answer = "Не вдалося сформувати відповідь. Спробуй, будь ласка, ще раз."
@@ -323,9 +339,17 @@ class ChatOnlyService:
             }
         )
 
-    async def _generate_answer(self, messages: list[dict[str, str]]) -> str:
-        payload = await self._ollama.chat(messages=messages, model=self._settings.ollama_dialogue_model or None)
-        answer = str(payload.get("message", {}).get("content", "")).strip()
+    async def _generate_answer(self, messages: list[dict[str, str]], *, request_id: str = "") -> str:
+        parts = [
+            chunk
+            async for chunk in self._ollama.stream_chat(
+                messages=messages,
+                model=self._settings.ollama_dialogue_model or None,
+                idle_timeout_seconds=self._ollama_stream_idle_timeout_seconds,
+                request_id=request_id,
+            )
+        ]
+        answer = "".join(parts).strip()
         return answer or "Не зміг сформувати відповідь. Спробуй, будь ласка, перефразувати запит."
 
     async def debug_memory_search(self, *, user_text: str, user_id: str) -> dict[str, object]:

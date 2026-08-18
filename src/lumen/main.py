@@ -12,7 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import uvicorn
 
 if __package__ in (None, ""):
@@ -198,6 +198,7 @@ chat_service = ChatOnlyService(
     context_executor=context_executor,
     reminder_service=reminder_service,
     calendar_action_service=calendar_action_service,
+    ollama_stream_idle_timeout_seconds=settings.ollama_stream_idle_timeout_seconds,
     logger=logger,
 )
 knowledge_service = KnowledgeService(
@@ -265,6 +266,10 @@ def _ollama_stream(payload: dict[str, object]) -> StreamingResponse:
         yield (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
 
     return StreamingResponse(events(), media_type="application/x-ndjson")
+
+
+def _ollama_stream_idle_error() -> JSONResponse:
+    return JSONResponse(status_code=504, content={"error": "Ollama stream stalled"})
 
 
 @app.get("/")
@@ -402,6 +407,8 @@ async def ollama_chat(payload: OllamaCompatibleChatRequest):
     result = await chat_service.process_chat_request_result(
         ChatRequest(text=text, user_id=_user_id(payload.user_id)), _request_id(), deliver=False
     )
+    if result.execution_outcome == "cancelled_idle":
+        return _ollama_stream_idle_error()
     response = {"model": _ollama_model(payload.model), "created_at": datetime.now(timezone.utc).isoformat(), "message": {"role": "assistant", "content": result.answer}, "done": True}
     return _ollama_stream(response) if payload.stream else response
 
@@ -414,6 +421,8 @@ async def ollama_generate(payload: OllamaCompatibleGenerateRequest):
     result = await chat_service.process_chat_request_result(
         ChatRequest(text=text, user_id=_user_id(payload.user_id)), _request_id(), deliver=False
     )
+    if result.execution_outcome == "cancelled_idle":
+        return _ollama_stream_idle_error()
     response = {"model": _ollama_model(payload.model), "created_at": datetime.now(timezone.utc).isoformat(), "response": result.answer, "done": True}
     return _ollama_stream(response) if payload.stream else response
 

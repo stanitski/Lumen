@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     ollama_dialogue_model: str = ""
     ollama_embedding_model: str = "embeddinggemma"
     ollama_timeout_seconds: float = 240.0
+    ollama_stream_idle_timeout_seconds: float = 240.0
     ollama_client_keep_alive: str = "5m"
     ollama_debug_dump_path: str = "./data/debug/last_ollama_request.json"
     ollama_compat_user_id: str = ""
@@ -80,6 +81,13 @@ class Settings(BaseSettings):
     def _validate_calendar_reconnect_seconds(cls, value: float) -> float:
         if value <= 0:
             raise ValueError("HOME_ASSISTANT_CALENDAR_RECONNECT_SECONDS must be greater than zero")
+        return value
+
+    @field_validator("ollama_stream_idle_timeout_seconds")
+    @classmethod
+    def _validate_ollama_stream_idle_timeout_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("OLLAMA_STREAM_IDLE_TIMEOUT_SECONDS must be greater than zero")
         return value
 
     @field_validator("home_assistant_calendar_default_duration_minutes")

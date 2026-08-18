@@ -1,5 +1,15 @@
 # Lumen Change Log
 
+## 2026-08-18
+
+- Type: progress-based Ollama streaming watchdog
+- Changed files: Ollama connector, chat orchestration, Ollama-compatible API,
+  configuration, focused tests, and runtime documentation.
+- Reason: preserve slow but live final generations beyond the old total timeout
+  while detecting a genuine 240-second stall after observable stream progress.
+- Runtime risk: medium. There is intentionally no deadline before the first
+  frame; same-user requests are not cancelled and may finish out of order.
+
 ## 2026-08-08
 
 - Type: Ollama inference timeout tuning

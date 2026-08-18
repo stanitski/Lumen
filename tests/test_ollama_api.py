@@ -19,6 +19,9 @@ from lumen.services.delivery import DeliveryService
 
 
 class FakeChatService:
+    def __init__(self, *, execution_outcome: str = "ok") -> None:
+        self.execution_outcome = execution_outcome
+
     async def process_chat_request(self, payload, request_id: str) -> None:
         del payload, request_id
 
@@ -27,7 +30,13 @@ class FakeChatService:
 
     async def process_chat_request_result(self, payload, request_id: str, *, deliver: bool = True, **kwargs) -> ChatResult:
         del kwargs
-        return ChatResult(request_id=request_id, user_id=payload.user_id or "VST", answer=f"answer:{payload.text}", delivered=deliver)
+        return ChatResult(
+            request_id=request_id,
+            user_id=payload.user_id or "VST",
+            answer=f"answer:{payload.text}",
+            delivered=deliver,
+            execution_outcome=self.execution_outcome,
+        )
 
     async def debug_memory_search(self, *, user_text: str, user_id: str) -> dict[str, object]:
         return {"answer": f"answer:{user_text}", "context": {"user_id": user_id}, "message_count": 2}
@@ -58,6 +67,19 @@ class OllamaCompatibleApiTests(unittest.TestCase):
         event = json.loads(response.text)
         self.assertEqual("answer:Hello", event["message"]["content"])
         self.assertIs(event["done"], True)
+
+    def test_ollama_idle_stream_is_reported_as_compatible_gateway_timeout(self) -> None:
+        main.chat_service = FakeChatService(execution_outcome="cancelled_idle")
+
+        for endpoint, payload in (
+            ("/api/chat", {"model": "lumen", "stream": False, "messages": [{"role": "user", "content": "Hello"}]}),
+            ("/api/generate", {"model": "lumen", "stream": True, "prompt": "Hello"}),
+        ):
+            with self.subTest(endpoint=endpoint):
+                response = self.client.post(endpoint, json=payload)
+
+                self.assertEqual(504, response.status_code)
+                self.assertEqual({"error": "Ollama stream stalled"}, response.json())
 
     def test_debug_search_uses_chat_pipeline(self) -> None:
         response = self.client.post("/memory/debug-search", json={"text": "find this", "user_id": "VST"})

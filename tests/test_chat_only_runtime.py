@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from datetime import datetime, timedelta
 
 from lumen.config import Settings
+from lumen.connectors.ollama import OllamaStreamIdleTimeout, OllamaStreamProtocolError
 from lumen.models import ChatRequest, ConversationTurnRecord, EmbeddingHit
 from lumen.services.chat_only import ChatOnlyService
 from lumen.services.calendar_actions import CalendarActionResult, CalendarCreateRequest
@@ -15,11 +17,78 @@ from lumen.services.reminders import ReminderInterception
 class FakeOllama:
     def __init__(self) -> None:
         self.messages: list[dict[str, str]] = []
+        self.stream_idle_timeout_seconds: float | None = None
 
     async def chat(self, *, messages: list[dict[str, str]], model: str | None = None) -> dict[str, object]:
         del model
         self.messages = messages
         return {"message": {"content": "Відповідь з діалогового режиму."}}
+
+    async def stream_chat(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        model: str | None = None,
+        idle_timeout_seconds: float,
+        request_id: str = "",
+    ):
+        del model, request_id
+        self.messages = messages
+        self.stream_idle_timeout_seconds = idle_timeout_seconds
+        yield "Відповідь з діалогового режиму."
+
+
+class IdleStreamOllama(FakeOllama):
+    async def stream_chat(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        model: str | None = None,
+        idle_timeout_seconds: float,
+        request_id: str = "",
+    ):
+        del model, request_id
+        self.messages = messages
+        self.stream_idle_timeout_seconds = idle_timeout_seconds
+        yield "Часткова відповідь, яку не треба доставляти."
+        raise OllamaStreamIdleTimeout("Ollama stream made no progress")
+
+
+class ConcurrentStreamOllama(FakeOllama):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = 0
+        self.both_started = asyncio.Event()
+
+    async def stream_chat(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        model: str | None = None,
+        idle_timeout_seconds: float,
+        request_id: str = "",
+    ):
+        del messages, model, idle_timeout_seconds
+        self.started += 1
+        if self.started == 2:
+            self.both_started.set()
+        await self.both_started.wait()
+        yield f"Відповідь {request_id}"
+
+
+class ProtocolErrorStreamOllama(FakeOllama):
+    async def stream_chat(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        model: str | None = None,
+        idle_timeout_seconds: float,
+        request_id: str = "",
+    ):
+        del messages, model, idle_timeout_seconds, request_id
+        if False:
+            yield ""
+        raise OllamaStreamProtocolError("missing done frame")
 
 
 class FakeMemoryService:
@@ -551,6 +620,75 @@ class ChatOnlyServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([7], memory.postprocessed_turn_ids)
         self.assertEqual("Відповідь з діалогового режиму.", delivery.calls[0]["answer"])
         self.assertEqual(memory.stored_facts[0]["category"], "preference")
+
+    async def test_idle_dialogue_stream_discards_partial_answer_without_side_effects(self) -> None:
+        memory = FakeMemoryService()
+        delivery = FakeDeliveryService()
+        ollama = IdleStreamOllama()
+        service = ChatOnlyService(
+            ollama=ollama,
+            memory_service=memory,
+            delivery_service=delivery,
+            settings=Settings(),
+            ollama_stream_idle_timeout_seconds=12.0,
+        )
+
+        result = await service.process_chat_request_result(
+            ChatRequest(text="Знайди важливе в каналах", user_id="test-user"),
+            "idle-request",
+        )
+
+        self.assertEqual("", result.answer)
+        self.assertEqual("cancelled_idle", result.execution_outcome)
+        self.assertEqual("skipped", result.persistence_outcome)
+        self.assertEqual("suppressed", result.delivery_outcome)
+        self.assertEqual({"outcome": "cancelled_idle"}, result.metadata)
+        self.assertEqual(12.0, ollama.stream_idle_timeout_seconds)
+        self.assertEqual({}, memory.stored_turn)
+        self.assertEqual([], memory.postprocessed_turn_ids)
+        self.assertEqual([], delivery.calls)
+
+    async def test_same_user_requests_are_not_cancelled_and_both_deliver(self) -> None:
+        memory = FakeMemoryService()
+        delivery = FakeDeliveryService()
+        ollama = ConcurrentStreamOllama()
+        service = ChatOnlyService(
+            ollama=ollama,
+            memory_service=memory,
+            delivery_service=delivery,
+            settings=Settings(),
+        )
+
+        first, second = await asyncio.gather(
+            service.process_chat_request_result(ChatRequest(text="Перший", user_id="same-user"), "request-a"),
+            service.process_chat_request_result(ChatRequest(text="Другий", user_id="same-user"), "request-b"),
+        )
+
+        self.assertEqual(2, ollama.started)
+        self.assertEqual({"Відповідь request-a", "Відповідь request-b"}, {first.answer, second.answer})
+        self.assertEqual(2, len(delivery.calls))
+        self.assertTrue(first.delivered)
+        self.assertTrue(second.delivered)
+
+    async def test_stream_protocol_error_keeps_existing_fallback_behavior(self) -> None:
+        memory = FakeMemoryService()
+        delivery = FakeDeliveryService()
+        service = ChatOnlyService(
+            ollama=ProtocolErrorStreamOllama(),
+            memory_service=memory,
+            delivery_service=delivery,
+            settings=Settings(),
+        )
+
+        result = await service.process_chat_request_result(
+            ChatRequest(text="Тест помилки", user_id="test-user"),
+            "protocol-error",
+        )
+
+        self.assertEqual("error", result.execution_outcome)
+        self.assertEqual("stored", result.persistence_outcome)
+        self.assertEqual("delivered", result.delivery_outcome)
+        self.assertEqual("Не вдалося сформувати відповідь. Спробуй, будь ласка, ще раз.", result.answer)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,15 @@
 
 This file stores durable technical, architectural, database, reporting, integration, naming, and business-logic decisions that future work should reuse instead of rediscovering.
 
+## 2026-08-18 - Final dialogue uses a progress-based Ollama stream watchdog
+
+- Context:
+  Final generation could spend most of the 240-second request timeout evaluating a large prompt, begin producing a valid answer, and then be cancelled with all generated work lost. Ollama exposes no per-request prompt-evaluation progress before its first streaming frame.
+- Decision:
+  Only the final `ChatOnlyService` dialogue call uses `OllamaConnector.stream_chat()`. It has no total or first-frame deadline; after the first valid NDJSON frame, 240 seconds without another valid frame triggers `cancelled_idle`. Partial text is neither persisted nor delivered, while inline Ollama-compatible endpoints return HTTP `504`. Contract, fact, embedding, knowledge, and news calls remain buffered with `OLLAMA_TIMEOUT_SECONDS=240`. A new message does not cancel an older request.
+- Consequences:
+  A healthy long generation may run beyond four minutes. A request that never emits its first frame can wait until transport failure or process shutdown. Concurrent requests can complete out of order, and an idle stream leaves no dialogue turn or callback.
+
 ## 2026-08-04 - News processing is an isolated synchronous integration
 
 - Context:

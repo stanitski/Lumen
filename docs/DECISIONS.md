@@ -3,13 +3,17 @@
 Це curated view. Повний хронологічний ledger збережено у root
 `DECISIONS.md`. Причини, не підтверджені live-кодом, тут не домислюються.
 
-## ADR-000: Ollama timeout for shared GPU
+## ADR-000: Ollama streaming watchdog for shared GPU
 
-- Decision: `OLLAMA_TIMEOUT_SECONDS` defaults to `240`.
-- Reason: a workstation GPU can be temporarily busy, so a long but live
-  generation must not be cut off after 120 seconds.
-- Consequences: a genuinely stalled request can take up to four minutes to
-  return Lumen's fallback answer; `num_predict` is intentionally unrestricted.
+- Decision: final dialogue uses Ollama NDJSON streaming without a total or
+  first-frame deadline. After the first valid frame,
+  `OLLAMA_STREAM_IDLE_TIMEOUT_SECONDS=240` limits only silence between frames.
+  Buffered contract/fact/embed calls retain `OLLAMA_TIMEOUT_SECONDS=240`.
+- Reason: prompt evaluation can exceed four minutes while Ollama remains live;
+  standard Ollama streaming exposes progress only after its first frame.
+- Consequences: idle partial text is discarded without persistence or callback;
+  inline endpoints return `504`. New messages do not cancel older requests,
+  and `num_predict` remains unrestricted.
 - Status: active.
 
 ## ADR-001: chat-memory-knowledge core

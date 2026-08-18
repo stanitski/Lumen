@@ -143,7 +143,14 @@ SQLite vector similarity виконується in-process у `MemoryStore`, а 
 Є один provider adapter: `OllamaConnector`. Він викликає Ollama `/api/chat`,
 `/api/embed` або `/api/embeddings`, додає runtime context і використовує
 `OLLAMA_CLIENT_KEEP_ALIVE`. `MemoryService` робить contract/fact/topic calls;
-`ChatOnlyService._generate_answer()` робить фінальний dialogue call.
+`ChatOnlyService._generate_answer()` робить фінальний dialogue call через
+внутрішній NDJSON stream. До першого кадру deadline немає; після першого
+валідного кадру `OLLAMA_STREAM_IDLE_TIMEOUT_SECONDS` обмежує лише період тиші
+між кадрами. Інші Ollama calls залишаються buffered.
+
+Зовнішні `/api/chat` і `/api/generate` не транслюють upstream fragments:
+`stream:true` і далі повертає один зібраний terminal NDJSON event. Idle watchdog
+не зберігає й не доставляє partial; inline ingress отримує HTTP `504`.
 
 ## Конфігурація
 

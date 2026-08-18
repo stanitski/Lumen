@@ -96,8 +96,10 @@ calendar read проєктує events у reminders.
    `ReminderService.intercept_contract()`. Calendar create передається
    `CalendarActionService.execute()`. Обидва flows можуть повернути
    детерміновану відповідь без final dialogue call.
-8. Для звичайної розмови `ChatOnlyService._generate_answer()` викликає
-   `OllamaConnector.chat()`.
+8. Для звичайної розмови `ChatOnlyService._generate_answer()` агрегує
+   `OllamaConnector.stream_chat()`. До першого кадру timeout немає; далі
+   watchdog обмежує лише 240 секунд тиші між валідними NDJSON frames. Idle
+   partial не зберігається і не доставляється.
 9. Non-global turn записується через `MemoryService.add_turn()`. Після цього
    callback delivery виконує `DeliveryService.deliver_chat_answer()`, а
    `MemoryService.postprocess_dialogue_turn()` добуває durable facts і
@@ -179,7 +181,7 @@ Generic Home Assistant entity-state read і device control не реалізов
 
 | Залежність | Конфігурація | Використання |
 |---|---|---|
-| Ollama HTTP | `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_DIALOGUE_MODEL`, `OLLAMA_EMBEDDING_MODEL`, `OLLAMA_TIMEOUT_SECONDS`, `OLLAMA_CLIENT_KEEP_ALIVE` | `OllamaConnector` |
+| Ollama HTTP | `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_DIALOGUE_MODEL`, `OLLAMA_EMBEDDING_MODEL`, `OLLAMA_TIMEOUT_SECONDS`, `OLLAMA_STREAM_IDLE_TIMEOUT_SECONDS`, `OLLAMA_CLIENT_KEEP_ALIVE` | `OllamaConnector` |
 | SQLite | `LUMEN_DB_PATH` | `Database`, `MemoryStore`, `ReminderService` |
 | Home Assistant | `HOME_ASSISTANT_URL`, `HOME_ASSISTANT_TOKEN`, `HOME_ASSISTANT_WEBHOOK_ID`, `HOME_ASSISTANT_WEBHOOK_URL` | delivery і calendar services |
 | HA Calendar | `HOME_ASSISTANT_CALENDAR_ENTITY_IDS`, `HOME_ASSISTANT_CALENDAR_WRITE_ENTITY_ID`, `HOME_ASSISTANT_CALENDAR_TARGET_CHAT_ID`, `HOME_ASSISTANT_CALENDAR_ALL_DAY_TIME`, `HOME_ASSISTANT_CALENDAR_RECONNECT_SECONDS`, `HOME_ASSISTANT_CALENDAR_DEFAULT_DURATION_MINUTES` | calendar read/write/projection |
