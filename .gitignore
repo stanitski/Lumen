@@ -20,6 +20,7 @@ data/*.backup.db
 data/*-smoke.db
 data/debug/
 data/telegram/
+data/backups/
 /data/knowledge/*
 !/data/knowledge/.gitkeep
 /data/memory/*
