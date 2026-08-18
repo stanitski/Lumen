@@ -28,6 +28,8 @@ from lumen.models import (
     ConnectorResponse,
     KnowledgeScope,
     KnowledgeUploadResult,
+    NewsProcessingRequest,
+    NewsProcessingResult,
     OllamaCompatibleChatRequest,
     OllamaCompatibleGenerateRequest,
     OllamaCompatibleShowRequest,
@@ -40,11 +42,12 @@ from lumen.services.calendar_actions import CalendarActionService
 from lumen.services.home_assistant_calendar import CalendarEvent, HomeAssistantCalendarClient
 from lumen.services.knowledge import KnowledgeService
 from lumen.services.memory import MemoryService
+from lumen.services.news_processing import NewsProcessingBusyError, NewsProcessingService
 from lumen.services.reminders import ReminderService, normalize_delivery_route
 from lumen.services.reminder_wake import WindowsWakeAdapter
 from lumen.services.speech_to_text import SpeechToTextError, SpeechToTextService
 from lumen.services.telegram_context import TelegramContextService
-from lumen.services.web_search import DuckDuckGoWebSearch
+from lumen.services.web_search import DuckDuckGoWebSearch, WebPageExtractor
 from lumen.storage.db import Database
 
 
@@ -177,8 +180,16 @@ elif settings.home_assistant_calendar_write_entity_id.strip():
 memory_service = MemoryService(memory_store, ollama, settings, default_user_id="global", logger=logger)
 speech_to_text_service = SpeechToTextService(settings, logger=logger)
 telegram_context_service = TelegramContextService(settings, memory_store, speech_to_text_service, logger=logger)
-web_search = DuckDuckGoWebSearch(logger=logger)
+web_page_extractor = WebPageExtractor(logger=logger)
+web_search = DuckDuckGoWebSearch(logger=logger, page_extractor=web_page_extractor)
 context_executor = ContextExecutor(telegram_context_service, web_search, logger=logger)
+news_processing_service = NewsProcessingService(
+    extractor=web_page_extractor,
+    ollama=ollama,
+    memory_service=memory_service,
+    default_user_id=settings.lumen_user_id.strip() or "VST",
+    logger=logger,
+)
 chat_service = ChatOnlyService(
     ollama=ollama,
     memory_service=memory_service,
@@ -322,6 +333,18 @@ async def upload_knowledge(
         source_ref=source_ref,
         max_chunk_chars=max_chunk_chars,
     )
+
+
+@app.post("/news/process", response_model=NewsProcessingResult)
+async def process_news(payload: NewsProcessingRequest) -> NewsProcessingResult:
+    try:
+        return await news_processing_service.process(payload, user_id=_user_id(payload.user_id))
+    except NewsProcessingBusyError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
 
 
 @app.get("/memory", response_class=HTMLResponse)

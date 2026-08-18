@@ -7,6 +7,7 @@ import logging
 import asyncio
 import math
 import re
+import unicodedata
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from typing import get_args
@@ -47,6 +48,17 @@ class MemoryService:
     _KNOWLEDGE_SOURCE_PREFIX = "knowledge:"
     _VOICE_TRIGGER_PHRASES = ("вголос", "вслух")
     _VOICE_MEMORY_PHRASES = ("вголос", "вслух", "озвуч", "read aloud", "aloud")
+    _NEWS_CONTEXT_CATEGORY = "news_context"
+    _NEWS_FILTER_TAG = "news_filter"
+    _NEWS_TOPIC_PREFIX = "topic:"
+    _NEWS_FILTER_ADD_PATTERN = re.compile(
+        r"(?:\bне\s+показуй\b|\bвідкидай\b|\bне\s+хочу\s+чути(?:\s+про)?\b)\s+(?P<topic>.+)",
+        re.IGNORECASE,
+    )
+    _NEWS_FILTER_REMOVE_PATTERN = re.compile(
+        r"(?:\bзнову\s+показуй\b|\bприбери\s+заборону(?:\s+на)?\b|\bзніми\s+заборону(?:\s+на)?\b)\s+(?P<topic>.+)",
+        re.IGNORECASE,
+    )
     _FACT_CONTEXT_ITEM_LIMIT = 10
     _FACT_CONTEXT_CHAR_LIMIT = 2400
     _FACT_ESSENTIAL_PREFERENCE_LIMIT = 3
@@ -252,6 +264,14 @@ class MemoryService:
             normalized_predicate = predicate.strip().lower().replace(" ", "_")
             if normalized_predicate not in self._allowed_predicates:
                 continue
+            if category == self._NEWS_CONTEXT_CATEGORY:
+                if normalized_predicate != "dislikes":
+                    continue
+                topic = self._news_topic_subject(raw_subject or value).removeprefix(self._NEWS_TOPIC_PREFIX)
+                if not topic:
+                    continue
+                results.append(self._news_dislike_fact(user_id=user_id, topic=topic, value=value))
+                continue
             subject = "current_user" if category == "profile" else raw_subject
             if category != "profile" and not subject:
                 continue
@@ -285,6 +305,47 @@ class MemoryService:
             )
         return results
 
+    @classmethod
+    def normalize_news_topic(cls, value: object) -> str:
+        """Build a stable topic key without applying semantic topic classification."""
+        text = unicodedata.normalize("NFKC", str(value or ""))
+        text = re.sub(r"\s+", " ", text).strip(" .,:;!?…\"'«»„“”")
+        return text.casefold()[:100]
+
+    @classmethod
+    def _news_topic_subject(cls, topic: object) -> str:
+        normalized = cls.normalize_news_topic(topic)
+        if normalized.startswith(cls._NEWS_TOPIC_PREFIX):
+            normalized = normalized.removeprefix(cls._NEWS_TOPIC_PREFIX)
+        return f"{cls._NEWS_TOPIC_PREFIX}{normalized}" if normalized else ""
+
+    @classmethod
+    def _news_dislike_fact(cls, *, user_id: str, topic: str, value: object = "") -> dict[str, object]:
+        display_value = str(value or "").strip().rstrip(".") or topic
+        return {
+            "category": cls._NEWS_CONTEXT_CATEGORY,
+            "user_id": user_id,
+            "subject": cls._news_topic_subject(topic),
+            "predicate": "dislikes",
+            "value": display_value[:500],
+            "confidence": 1.0,
+            "importance": 8,
+            "tags": [cls._NEWS_FILTER_TAG],
+            "retention_policy": "permanent",
+            "expires_at": None,
+        }
+
+    @classmethod
+    def _news_filter_command(cls, text: str) -> tuple[str, str] | None:
+        for action, pattern in (("remove", cls._NEWS_FILTER_REMOVE_PATTERN), ("add", cls._NEWS_FILTER_ADD_PATTERN)):
+            match = pattern.search(text)
+            if match is None:
+                continue
+            topic = cls.normalize_news_topic(match.group("topic"))
+            if topic:
+                return action, topic
+        return None
+
     async def extract_memory_facts(self, payload_text: str, user_id: str) -> list[dict[str, object]]:
         messages = [
             {
@@ -295,7 +356,7 @@ class MemoryService:
                     "{\n"
                     '  "facts": [\n'
                     "    {\n"
-                    '      "category": "preference|profile|routine|rule|relationship|project|secret|credential|device_alias",\n'
+                    '      "category": "preference|profile|routine|rule|relationship|project|secret|credential|device_alias|news_context",\n'
                     '      "subject": "string",\n'
                     '      "predicate": "is|prefers|likes|dislikes|alias|uses|owns|works_at|lives_in|role|preferred_name",\n'
                     '      "value": "string",\n'
@@ -310,6 +371,11 @@ class MemoryService:
                     "- If the user asks to be addressed informally, to speak on 'ти', or uses a phrase like "
                     "'звертайся до мене на ти', extract a preference fact with category=preference, "
                     "subject=current_user, predicate=prefers, value=address the user informally with 'ти'.\n"
+                    "- For news filters, remember only an explicit opt-out: phrases such as 'не показуй гороскопи', "
+                    "'відкидай езотерику', or 'не хочу чути про спорт' use category=news_context, "
+                    "subject=topic:<lowercase normalized topic>, predicate=dislikes, and the topic as value. "
+                    "Use tags=[news_filter] and permanent retention. Never create likes for news. "
+                    "For 'знову показуй ...' or 'прибери заборону ...', return no news fact; removal is handled separately.\n"
                     '- If there are no durable facts, return {"facts": []}.\n'
                     "- Do not include any explanation, markdown, or extra keys."
                 ),
@@ -320,11 +386,17 @@ class MemoryService:
 
         payload = await self._ollama.chat(messages=messages)
         content = str(payload.get("message", {}).get("content", "")).strip()
-        raw = self._safe_json_loads(content)
-        if raw is None:
-            return []
+        raw = self._safe_json_loads(content) or {}
         raw_facts = raw.get("facts", raw.get("memory_facts", []))
-        return self.normalize_memory_facts(raw_facts, user_id)
+        facts = self.normalize_memory_facts(raw_facts, user_id)
+        command = self._news_filter_command(payload_text)
+        if command is None:
+            return facts
+        action, topic = command
+        facts = [fact for fact in facts if str(fact.get("category", "")) != self._NEWS_CONTEXT_CATEGORY]
+        if action == "add":
+            facts.append(self._news_dislike_fact(user_id=user_id, topic=topic, value=topic))
+        return facts
 
     def store_memory_facts(self, facts: list[dict[str, object]], *, source_ref: str, user_id: str) -> list[MemoryFact]:
         stored: list[MemoryFact] = []
@@ -335,7 +407,30 @@ class MemoryService:
             if retention_policy not in self._allowed_retention_policies:
                 retention_policy = "permanent"
             expires_at = self._resolve_expires_at(fact_copy.pop("expires_at", None), retention_policy)
-            self._store.add_fact(user_id=fact_user_id, source_ref=source_ref, expires_at=expires_at, **fact_copy)
+            if str(fact_copy.get("category", "")) == self._NEWS_CONTEXT_CATEGORY:
+                topic = self._news_topic_subject(fact_copy.get("subject", "")).removeprefix(self._NEWS_TOPIC_PREFIX)
+                if not topic or str(fact_copy.get("predicate", "")) != "dislikes":
+                    continue
+                fact_copy = self._news_dislike_fact(
+                    user_id=fact_user_id,
+                    topic=topic,
+                    value=fact_copy.get("value", topic),
+                )
+                fact_copy.pop("user_id")
+                fact_copy.pop("retention_policy")
+                fact_copy.pop("expires_at")
+                retention_policy = "permanent"
+                expires_at = None
+                self._store.upsert_news_dislike(
+                    user_id=fact_user_id,
+                    subject=str(fact_copy["subject"]),
+                    value=str(fact_copy["value"]),
+                    confidence=float(fact_copy["confidence"]),
+                    importance=int(fact_copy["importance"]),
+                    source_ref=source_ref,
+                )
+            else:
+                self._store.add_fact(user_id=fact_user_id, source_ref=source_ref, expires_at=expires_at, **fact_copy)
             stored.append(
                 MemoryFact(
                     user_id=fact_user_id,
@@ -345,6 +440,13 @@ class MemoryService:
                 )
             )
         return stored
+
+    def list_active_news_dislikes(self, user_id: str) -> list[dict[str, object]]:
+        return self._store.list_active_news_dislikes(user_id=user_id)
+
+    def remove_news_dislike(self, *, user_id: str, topic: object) -> int:
+        subject = self._news_topic_subject(topic)
+        return self._store.delete_news_topic_facts(user_id=user_id, subject=subject) if subject else 0
 
     async def forget_memory(
         self,
@@ -1807,6 +1909,9 @@ class MemoryService:
         except Exception as exc:
             self._logger.exception("Topic extraction failed after indexing turn %s: %s", turn.id, exc)
         try:
+            news_command = self._news_filter_command(turn.question)
+            if news_command and news_command[0] == "remove":
+                self.remove_news_dislike(user_id=turn.user_id, topic=news_command[1])
             facts = await self.extract_memory_facts(turn.question, turn.user_id)
             if facts:
                 self.store_memory_facts(facts, source_ref=f"dialogue:turn:{turn.id}", user_id=turn.user_id)

@@ -2,7 +2,7 @@
 
 ## Статус і джерела
 
-Документ описує live wiring гілки `codex/calendar-reminders` на 2026-07-23.
+Документ описує live wiring гілки `codex/calendar-reminders` на 2026-08-04.
 Ключові джерела: `src/lumen/main.py`, `src/lumen/services/chat_only.py`,
 `src/lumen/services/memory.py`, `src/lumen/services/reminders.py`,
 `src/lumen/storage/db.py`.
@@ -19,6 +19,11 @@ flowchart LR
     C --> X["ContextExecutor"]
     X --> T["TelegramContextService"]
     X --> W["DuckDuckGoWebSearch"]
+    W --> E["WebPageExtractor"]
+    I --> N["NewsProcessingService"]
+    N --> E
+    N --> M
+    N --> O
     C --> R["ReminderService"]
     C --> A["CalendarActionService"]
     C --> D["DeliveryService"]
@@ -43,6 +48,9 @@ flowchart LR
   конфігурації, `HomeAssistantCalendarClient.run_forever()`.
 
 HTTP endpoints визначені тільки у `src/lumen/main.py`.
+
+`POST /news/process` є окремим synchronous ingress і не проходить через
+`ChatOnlyService` чи callback delivery.
 
 ## Runtime: звичайний chat
 
@@ -71,6 +79,17 @@ sequenceDiagram
 `/chat` і `/connector` повертають `202` та виконують flow через
 `asyncio.create_task()`. `/api/chat` і `/api/generate` чекають той самий
 semantic result inline та не викликають callback.
+
+## Runtime: Feedreader news
+
+`NewsProcessingService` приймає Feedreader metadata, через shared
+`WebPageExtractor` читає final public HTML URL і Trafilatura main text, а за
+невдалого extraction використовує RSS fallback від 160 символів. Перший
+structured Ollama call відкидає лише technical/editorial junk і зіставляє
+article з exact user `news_context/topic:*` `dislikes`; другий call для `keep`
+готує 2–4 українські 5W-речення. Результат `keep|skip|retry` містить stable Todo
+key від SHA-256 canonical URL. Один in-flight job має 180-second deadline;
+конкурентний запит отримує `429` і `Retry-After: 60`.
 
 ## Telegram → відповідь
 
@@ -108,7 +127,8 @@ SQLite state machine. `run_due()` claim-ить due rows, викликає
 ## Пам’ять і RAG
 
 - `conversation_turns`: turn pair, metadata, topic і question/answer vectors;
-- `memory_facts`: profile/preferences та інші normalized facts;
+- `memory_facts`: profile/preferences, permanent user-only news topic
+  `dislikes` та інші normalized facts;
 - `memory_embeddings`: knowledge chunks;
 - `knowledge_upload_sessions`: upload state;
 - `MemoryService.build_planner_context()` паралельно читає semantic,
@@ -140,7 +160,7 @@ token і `HOME_ASSISTANT_CALENDAR_WRITE_ENTITY_ID`.
 - Ollama HTTP;
 - Home Assistant REST, WebSocket і webhook callback;
 - Telegram MTProto/Telethon;
-- DuckDuckGo HTML search та відкриття максимум двох сторінок;
+- DuckDuckGo HTML search, shared public-page extraction і Trafilatura;
 - `ffmpeg` і `faster-whisper`;
 - Windows Task Scheduler.
 
@@ -149,5 +169,7 @@ token і `HOME_ASSISTANT_CALENDAR_WRITE_ENTITY_ID`.
 - `ContextExecutor._execute_home_assistant()` і `_execute_knowledge()` — TODO;
 - startup запускає один recovery pass, а не in-process scheduler loop;
 - calendar projection охоплює тільки поточний Kyiv day;
+- DNS перевіряється перед кожним page request/redirect, але transport не pin-ить
+  resolved IP, тому DNS rebinding лишається residual risk;
 - delivery/reminder/calendar живі перевірки залежать від зовнішньої
   конфігурації й у межах документаційного аудиту не виконувалися.

@@ -3,6 +3,15 @@
 Це curated view. Повний хронологічний ledger збережено у root
 `DECISIONS.md`. Причини, не підтверджені live-кодом, тут не домислюються.
 
+## ADR-000: Ollama timeout for shared GPU
+
+- Decision: `OLLAMA_TIMEOUT_SECONDS` defaults to `240`.
+- Reason: a workstation GPU can be temporarily busy, so a long but live
+  generation must not be cut off after 120 seconds.
+- Consequences: a genuinely stalled request can take up to four minutes to
+  return Lumen's fallback answer; `num_predict` is intentionally unrestricted.
+- Status: active.
+
 ## ADR-001: chat-memory-knowledge core
 
 - Рішення: `ChatOnlyService` є єдиним chat orchestrator.
@@ -91,4 +100,17 @@
 - Причина: current code не має відповідних modules/wiring.
 - Альтернатива: видалення без audit.
 - Наслідки: historical evidence доступне, але onboarding веде до live docs.
+- Статус: active.
+
+## ADR-011: news processing як isolated synchronous integration
+
+- Рішення: `POST /news/process` використовує окремий `NewsProcessingService`,
+  shared `WebPageExtractor`, exact user `news_context` dislikes і два bounded
+  Ollama calls; одночасно виконується один job.
+- Причина: не переносити article retrieval/editorial policy у Home Assistant і
+  не повертати generic planner/action architecture.
+- Альтернатива: Ollama prompt без article body у HA automation або окремі
+  extractor integrations.
+- Наслідки: `keep|skip` terminal, `retry`/`429` зберігають raw item; likes і
+  нові config values не потрібні.
 - Статус: active.

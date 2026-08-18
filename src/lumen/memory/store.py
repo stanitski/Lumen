@@ -1091,6 +1091,101 @@ class MemoryStore:
             connection.commit()
             return int(cursor.lastrowid)
 
+    def upsert_news_dislike(
+        self,
+        *,
+        user_id: str,
+        subject: str,
+        value: str,
+        confidence: float,
+        importance: int,
+        source_ref: str,
+    ) -> int:
+        """Persist one permanent news-topic opt-out and collapse legacy rows."""
+        now = local_now_iso()
+        with self._session_factory() as connection:
+            rows = connection.execute(
+                """
+                SELECT id
+                FROM memory_facts
+                WHERE user_id = ?
+                  AND category = 'news_context'
+                  AND subject = ?
+                  AND predicate IN ('dislikes', 'likes')
+                ORDER BY CASE predicate WHEN 'dislikes' THEN 0 ELSE 1 END,
+                         importance DESC, last_seen DESC, id DESC
+                """,
+                (user_id, subject),
+            ).fetchall()
+            if rows:
+                kept_id = int(rows[0]["id"])
+                connection.execute(
+                    """
+                    UPDATE memory_facts
+                    SET predicate = 'dislikes', value = ?, confidence = ?, importance = ?,
+                        source_ref = ?, last_seen = ?, expires_at = NULL, tags_json = ?
+                    WHERE id = ?
+                    """,
+                    (value, confidence, importance, source_ref, now, json.dumps(["news_filter"]), kept_id),
+                )
+                redundant_ids = [int(row["id"]) for row in rows[1:]]
+                if redundant_ids:
+                    placeholders = ", ".join("?" for _ in redundant_ids)
+                    connection.execute(f"DELETE FROM memory_facts WHERE id IN ({placeholders})", redundant_ids)
+                connection.commit()
+                return kept_id
+
+            cursor = connection.execute(
+                """
+                INSERT INTO memory_facts(
+                    user_id, category, subject, predicate, value, confidence, importance,
+                    source_ref, last_seen, expires_at, tags_json
+                )
+                VALUES (?, 'news_context', ?, 'dislikes', ?, ?, ?, ?, ?, NULL, ?)
+                """,
+                (user_id, subject, value, confidence, importance, source_ref, now, json.dumps(["news_filter"])),
+            )
+            connection.commit()
+            return int(cursor.lastrowid)
+
+    def list_active_news_dislikes(self, *, user_id: str, limit: int = 100) -> list[dict]:
+        """Return only this user's non-expired canonical news topic opt-outs."""
+        safe_limit = max(1, min(int(limit), 500))
+        now = local_now_iso()
+        with self._session_factory() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, user_id, category, subject, predicate, value, confidence, importance,
+                       source_ref, last_seen, expires_at, tags_json
+                FROM memory_facts
+                WHERE user_id = ?
+                  AND category = 'news_context'
+                  AND subject LIKE 'topic:%'
+                  AND predicate = 'dislikes'
+                  AND (expires_at IS NULL OR expires_at > ?)
+                ORDER BY importance DESC, last_seen DESC, id DESC
+                LIMIT ?
+                """,
+                (user_id, now, safe_limit),
+            ).fetchall()
+        return [self._row_to_fact_dict(row) for row in rows]
+
+    def delete_news_topic_facts(self, *, user_id: str, subject: str) -> int:
+        """Remove all current and legacy preference rows for one news topic."""
+        with self._session_factory() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM memory_facts
+                WHERE user_id = ?
+                  AND category = 'news_context'
+                  AND subject = ?
+                  AND predicate IN ('dislikes', 'likes')
+                """,
+                (user_id, subject),
+            )
+            connection.commit()
+            return int(cursor.rowcount)
+
     def list_facts(self, user_id: str, limit: int = 100, *, include_global: bool = True) -> list[dict]:
         safe_limit = max(1, min(limit, 500))
         scope_clause = "WHERE user_id in ( ?,'global')" if include_global else "WHERE user_id = ?"

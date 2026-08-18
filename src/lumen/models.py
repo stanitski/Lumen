@@ -64,6 +64,8 @@ ConnectorEventType = Literal[
     "knowledge_scope_selected",
 ]
 ConnectorStatus = Literal["accepted", "pending", "ignored"]
+NewsProcessingStatus = Literal["keep", "skip", "retry"]
+NewsContentSource = Literal["article", "rss"]
 
 
 class MemoryHit(BaseModel):
@@ -126,6 +128,46 @@ class EmbeddingHit(BaseModel):
     created_at: str = ""
     metadata: dict[str, object] = Field(default_factory=dict)
     expires_at: str | None = None
+
+
+class NewsProcessingRequest(BaseModel):
+    """One raw item received from the Feedreader queue."""
+
+    user_id: str | None = None
+    feed_url: str = ""
+    title: str = ""
+    link: str = ""
+    description: str = ""
+    content: str = ""
+    published_at: str | None = None
+    received_at: str | None = None
+
+
+class NewsTodoItem(BaseModel):
+    item: str
+    description: str
+
+
+class NewsFiveW(BaseModel):
+    what: str = ""
+    who: str = ""
+    where: str = ""
+    when: str = ""
+    why_or_context: str = ""
+    narration: str
+    missing_fields: list[str] = Field(default_factory=list)
+
+
+class NewsProcessingResult(BaseModel):
+    status: NewsProcessingStatus
+    news_id: str | None = None
+    content_source: NewsContentSource | None = None
+    canonical_url: str = ""
+    published_at: str | None = None
+    todo_item: NewsTodoItem | None = None
+    reason_code: str | None = None
+    reason: str | None = None
+    missing_5w: list[str] = Field(default_factory=list)
 
 
 class ChatResult(BaseModel):

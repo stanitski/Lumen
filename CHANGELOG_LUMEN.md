@@ -1,5 +1,37 @@
 # Lumen Change Log
 
+## 2026-08-08
+
+- Type: Ollama inference timeout tuning
+- Changed files: `src/lumen/config.py`, `.env.example`, `CHANGELOG_LUMEN.md`.
+- Reason: allow long final Lumen responses to finish when the shared GPU is
+  temporarily busy on the workstation.
+- Runtime risk: medium. A stalled Ollama request can now occupy a chat flow for
+  up to four minutes before Lumen returns its fallback answer.
+
+## 2026-08-05
+
+- Type: Feedreader RSS fallback completeness
+- Changed files: `src/lumen/services/news_processing.py`, `tests/test_news_processing.py`.
+- Reason: include the Feedreader title in fallback source text, so a valid short
+  description can still be editorially filtered and converted into a 5W brief
+  when its linked article cannot be opened.
+- Runtime risk: low. Article extraction remains the preferred source and the
+  existing minimum fallback-text threshold remains in force.
+
+## 2026-08-04
+
+- Type: Ізольована обробка Feedreader-новин
+- Changed files: `src/lumen/services/news_processing.py`, спільний web extractor,
+  memory fact operations, `POST /news/process`, Pydantic contracts, dependency/
+  packaging metadata, focused tests, and architecture docs.
+- Reason: завантажувати повний текст новини, відкидати лише редакційне сміття
+  та явні user-specific `dislikes`, після чого формувати коротку українську
+  5W-озвучку для стабільного Home Assistant Todo item.
+- Runtime risk: medium. Endpoint виконується синхронно, допускає лише одну
+  обробку одночасно та повертає `retry`/`429` без дозволу видаляти raw item.
+  Перед HA integration потрібна перевірка rebuilt executable і живого Ollama.
+
 ## 2026-07-23
 
 - Type: Token-efficient local AI context

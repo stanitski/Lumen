@@ -37,6 +37,8 @@ Ollama, зберігає діалог і доставляє відповідь �
 - callback delivery через `DeliveryService`;
 - memory inspection через `/memory`, `/memory/items`,
   `/memory/debug-search`, `/memory/delete`.
+- synchronous Feedreader article processing через `/news/process` зі shared
+  `WebPageExtractor`, exact user news dislikes та narration-ready 5W Todo output.
 
 ## Межі відповідальності
 
@@ -61,6 +63,8 @@ executor повертають `pending_implementation`; knowledge retrieval дл
 5. Reminder due/wake → `ReminderService.run_due()` → Home Assistant callback →
    корельоване confirmation/snooze.
 6. HA calendar snapshot/update → idempotent one-time reminder projection.
+7. Feedreader item → public article або RSS fallback → editorial/user filter →
+   `keep|skip|retry` і stable Todo item для озвучення.
 
 ## Поточний стан
 

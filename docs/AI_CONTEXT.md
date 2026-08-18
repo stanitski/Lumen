@@ -51,6 +51,11 @@ FastAPI ingress
      -> CalendarActionService -> Home Assistant Calendar REST
      -> DeliveryService -> Home Assistant callback
 
+  -> NewsProcessingService
+     -> WebPageExtractor -> public article | RSS fallback
+     -> MemoryService -> exact user news dislikes
+     -> OllamaConnector -> editorial classification + Ukrainian 5W
+
 HomeAssistantCalendarClient
   -> Home Assistant REST + WebSocket
   -> ReminderService calendar projection
@@ -101,6 +106,16 @@ calendar read проєктує events у reminders.
     `asyncio.create_task()` та повертають `202`. Ollama-compatible endpoints
     чекають результат і повертають його inline з `deliver=False`.
 
+### Обробка новин
+
+`POST /news/process` синхронно обробляє один Feedreader item. Один shared
+`WebPageExtractor` завантажує article і використовується також
+`DuckDuckGoWebSearch`; за невдалого article extraction допускається достатній
+RSS text. `NewsProcessingService` відкидає редакційне сміття та exact active
+`news_context/topic:*` `dislikes` користувача, а для `keep` окремо формує
+українську 5W-озвучку. Одночасно виконується лише один job; contention повертає
+`429`, а тимчасові збої — `status=retry`.
+
 ### Telegram і Home Assistant
 
 У репозиторії немає окремого Telegram bot ingress. Telegram message приходить
@@ -129,6 +144,8 @@ Generic Home Assistant entity-state read і device control не реалізов
 | `src/lumen/storage/db.py` | schema та migrations | `Database`, `SCHEMA`, `CURRENT_SCHEMA_VERSION` |
 | `src/lumen/connectors/ollama.py` | LLM/embedding adapter | `OllamaConnector`, `chat()`, `embed()` |
 | `src/lumen/services/context_executor.py` | bounded external context dispatch | `ContextExecutor`, `execute()`, `format_for_prompt()` |
+| `src/lumen/services/web_search.py` | bounded page retrieval and search | `WebPageExtractor`, `DuckDuckGoWebSearch` |
+| `src/lumen/services/news_processing.py` | Feedreader article filtering and 5W editing | `NewsProcessingService`, `NewsProcessingBusyError` |
 | `src/lumen/services/delivery.py` | HA callback transport | `DeliveryService`, `deliver_chat_answer()`, `deliver_reminder()` |
 | `src/lumen/services/reminders.py` | reminder state machine | `ReminderService`, `intercept_contract()`, `run_due()` |
 | `src/lumen/services/calendar_actions.py` | typed calendar write | `CalendarActionService`, `execute()`, `create()` |
@@ -147,7 +164,8 @@ Generic Home Assistant entity-state read і device control не реалізов
 - LLM provider: лише `OllamaConnector`.
 - Memory/RAG: `MemoryService` + `MemoryStore`; deterministic retrieval policy,
   facts, semantic/lexical dialogue candidates, knowledge embeddings.
-- Integrations: `TelegramContextService`, `DuckDuckGoWebSearch`,
+- Integrations: `TelegramContextService`, `WebPageExtractor`,
+  `DuckDuckGoWebSearch`, `NewsProcessingService`,
   `DeliveryService`, `HomeAssistantCalendarClient`,
   `CalendarActionService`, `SpeechToTextService`.
 - Configuration: `Settings` із `.env`; public template — `.env.example`.
@@ -166,7 +184,7 @@ Generic Home Assistant entity-state read і device control не реалізов
 | Home Assistant | `HOME_ASSISTANT_URL`, `HOME_ASSISTANT_TOKEN`, `HOME_ASSISTANT_WEBHOOK_ID`, `HOME_ASSISTANT_WEBHOOK_URL` | delivery і calendar services |
 | HA Calendar | `HOME_ASSISTANT_CALENDAR_ENTITY_IDS`, `HOME_ASSISTANT_CALENDAR_WRITE_ENTITY_ID`, `HOME_ASSISTANT_CALENDAR_TARGET_CHAT_ID`, `HOME_ASSISTANT_CALENDAR_ALL_DAY_TIME`, `HOME_ASSISTANT_CALENDAR_RECONNECT_SECONDS`, `HOME_ASSISTANT_CALENDAR_DEFAULT_DURATION_MINUTES` | calendar read/write/projection |
 | Telegram MTProto | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION_PATH`, history/message limits | `TelegramContextService` |
-| DuckDuckGo/public web | окремих credentials немає | `DuckDuckGoWebSearch` |
+| DuckDuckGo/public web | окремих credentials немає | `WebPageExtractor`, `DuckDuckGoWebSearch`, `NewsProcessingService`; Trafilatura виділяє main text |
 | `ffmpeg`/Whisper | `FFMPEG_PATH`, `STT_MODEL`, `STT_DEVICE`, `STT_COMPUTE_TYPE`, `STT_LANGUAGE` | `SpeechToTextService` |
 | Windows Task Scheduler | DB path передається wake entrypoint | `WindowsWakeAdapter` |
 

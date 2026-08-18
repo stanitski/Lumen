@@ -2,6 +2,24 @@
 
 This file stores durable technical, architectural, database, reporting, integration, naming, and business-logic decisions that future work should reuse instead of rediscovering.
 
+## 2026-08-04 - News processing is an isolated synchronous integration
+
+- Context:
+  Feedreader supplies metadata and a link, while Home Assistant needs one terminal decision and a narration-ready Todo item without embedding article retrieval or editorial prompts in automations.
+- Decision:
+  `POST /news/process` runs one `NewsProcessingService` job at a time. It uses the shared `WebPageExtractor`, falls back to sufficiently informative RSS text, rejects only technical/editorial junk, applies exact active user `news_context/topic:*` `dislikes`, and calls Ollama separately for classification and Ukrainian 5W editing. `keep` and confirmed `skip` are terminal; transient failures are `retry`, and contention is HTTP `429` with `Retry-After: 60`.
+- Consequences:
+  Home Assistant may remove a raw item only after `keep` or `skip`. The public Todo key is stable from the final canonical URL. The service introduces no scheduler, database schema, config setting, or user `likes` facts.
+
+## 2026-08-04 - Public-page extraction is shared and bounded
+
+- Context:
+  Both web search and news processing open third-party pages, so duplicated HTML stripping and redirect behavior would create inconsistent results and security policy.
+- Decision:
+  `WebPageExtractor` in `services/web_search.py` owns public DNS checks, manual redirect validation, HTML-only streaming limits, canonical URLs, and Trafilatura extraction. `DuckDuckGoWebSearch` retains its existing 5-result, 2-page, 1,200-character limits; news may use 12,000 characters. DNS is checked before each request but the transport is not IP-pinned, so DNS rebinding remains a documented residual risk.
+- Consequences:
+  Search and news share one extraction policy and dependency. Technical limits remain code constants rather than new configuration.
+
 ## 2026-07-22 - Google Calendar is projected through Home Assistant into one-time reminders
 
 - Context:

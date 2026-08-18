@@ -2,6 +2,9 @@
 
 ## Now
 
+- Rebuild/restart Lumen with Trafilatura and verify `POST /news/process` against one controlled real article and one RSS fallback without changing Home Assistant queues.
+- After the packaged endpoint is verified, replace the Home Assistant raw-news Ollama script with the `keep|skip|retry` contract; remove raw items only after `keep` or confirmed `skip`.
+
 - Verify one intentional live calendar-create command through Telegram, including a description and the configured 60-minute default; do not create an automated test event in the user's calendar.
 - Verify one live timed calendar event, one all-day event, one update, and one deletion through HA; the approved main and two Birthdays entities are already configured.
 - Verify one deployed reminder through Windows Task Scheduler wake with the current-user interactive principal, and a structured Home Assistant `reminder_confirmed:<id>:<delivery_id>` callback.

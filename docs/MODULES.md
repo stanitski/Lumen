@@ -1,18 +1,19 @@
 # Ключові модулі
 
-Статус: live-код гілки `codex/calendar-reminders`, 2026-07-23.
+Статус: live-код гілки `codex/calendar-reminders`, 2026-08-04.
 
 | Модуль | Призначення і ключові символи | Хто викликає / що викликає | Стан |
 |---|---|---|---|
 | `src/lumen/main.py` | FastAPI wiring, endpoints, startup/shutdown, `_project_calendar_events()` | зовнішній HTTP; створює всі сервіси | активний; містить module-level initialization |
 | `services/chat_only.py` | `ChatOnlyService`, prompt assembly, routing reminder/calendar, persistence/delivery | endpoints → service → memory/context/Ollama/reminder/calendar/delivery | центральний активний orchestrator |
-| `services/memory.py` | `MemoryService`, `GetContract`, retrieval policy, facts, dialogue/knowledge retrieval | chat/knowledge debug → store/Ollama | активний, великий і частково має legacy naming (`build_planner_context`) |
+| `services/memory.py` | `MemoryService`, `GetContract`, retrieval policy, facts, dialogue/knowledge retrieval, news topic dislikes | chat/knowledge/news → store/Ollama | активний, великий і частково має legacy naming (`build_planner_context`) |
 | `memory/store.py` | SQLite queries та in-process cosine search | memory/knowledge/Telegram services | активна частина змішана з legacy intents/skills/tasks API |
 | `storage/db.py` | `Database`, schema `v33`, reminder migrations | `main.py`, wake entrypoint, tests | активний; schema source of truth |
 | `connectors/ollama.py` | `OllamaConnector.chat()`, `.embed()`, `.healthcheck()` | memory/chat/knowledge | єдиний live LLM provider |
 | `services/context_executor.py` | `ContextExecutor.execute()` і prompt formatting | `ChatOnlyService` → Telegram/web adapters | Telegram/web активні; HA/knowledge handlers pending |
 | `services/telegram_context.py` | allowlisted bounded MTProto reads | `ContextExecutor` → Telethon/STT | активний read-only adapter; не ingress |
-| `services/web_search.py` | `DuckDuckGoWebSearch.search()` | `ContextExecutor` → public web | активний, bounded і network-dependent |
+| `services/web_search.py` | `WebPageExtractor`, `DuckDuckGoWebSearch.search()` | news/context executor → public web | активний, bounded і network-dependent |
+| `services/news_processing.py` | `NewsProcessingService`, editorial filter, user dislikes, 5W narration | `/news/process` → extractor/memory/Ollama | активна isolated synchronous integration |
 | `services/knowledge.py` | upload, extraction, chunking, embeddings | `/knowledge/upload` → extractor/Ollama/store | активний ingestion path |
 | `services/file_text.py` | text/PDF/file extraction | `KnowledgeService` | активний helper |
 | `services/speech_to_text.py` | attachment classification, download, ffmpeg, Whisper | `/connector`, Telegram media context | активний; external binaries/models required |

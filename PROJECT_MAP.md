@@ -2,7 +2,7 @@
 
 ## Overview
 
-Lumen is a local FastAPI assistant with one active runtime: chat, memory, knowledge retrieval, bounded external context, speech-to-text for connector attachments, and Home Assistant callback delivery.
+Lumen is a local FastAPI assistant with a chat-memory-knowledge core plus isolated reminders, calendar actions, and synchronous Feedreader news processing.
 
 ## Main directories
 
@@ -30,6 +30,10 @@ Lumen is a local FastAPI assistant with one active runtime: chat, memory, knowle
 10. Ollama generates the final answer.
 11. The turn is persisted, then post-processing extracts stable facts and updates dialogue metadata.
 12. `DeliveryService` sends callback responses through Home Assistant; Ollama-compatible routes return inline.
+13. `POST /news/process` opens one Feedreader article through the shared bounded
+    `WebPageExtractor`, applies editorial junk filtering and user-only news
+    topic `dislikes`, then returns `keep|skip|retry` with a narration-ready Todo
+    item for `keep`.
 
 Important endpoints:
 
@@ -41,11 +45,13 @@ Important endpoints:
 - `/api/show`
 - `/knowledge/upload`
 - `/memory`
+- `/news/process`
 
 ## Database
 
 - `conversation_turns`: dialogue pairs plus retrieval metadata and embeddings.
-- `memory_facts`: stable user facts and preferences.
+- `memory_facts`: stable user facts and preferences, including permanent
+  user-only `news_context/topic:*` `dislikes`.
 - `memory_embeddings`: indexed knowledge chunks.
 - `knowledge_upload_sessions`: upload state.
 - `reminders`: isolated reminder state, including `delivery_route_json`, nullable `parent_reminder_id`, and nullable calendar idempotency key `source_ref` from schema `v33`.
@@ -63,3 +69,5 @@ Historical documents may still mention those subsystems. They are not the source
 - Full live verification against Ollama and Home Assistant remains TBD.
 - `ContextExecutor` still has pending handlers for some source/operation pairs.
 - Calendar projection requires configured `HOME_ASSISTANT_CALENDAR_ENTITY_IDS` and canonical `HOME_ASSISTANT_CALENDAR_TARGET_CHAT_ID`; without both, it stays disabled. A rebuilt and restarted runtime applies schema `v33`.
+- Public URL checks do not pin the resolved TCP address; DNS rebinding remains a
+  residual risk. News processing intentionally permits only one in-flight job.
