@@ -161,6 +161,17 @@ class NewsProcessingServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("keep", result.status)
         self.assertEqual("rss", result.content_source)
 
+    async def test_insufficient_feedreader_context_is_terminal_skip(self) -> None:
+        ollama = FakeOllama([])
+        service = NewsProcessingService(extractor=FakeExtractor(None), ollama=ollama)
+
+        result = await service.process(request(content="", description="Короткий RSS опис."))
+
+        self.assertEqual("skip", result.status)
+        self.assertEqual("insufficient_source_context", result.reason_code)
+        self.assertEqual("https://agency.example/article?source=rss", result.canonical_url)
+        self.assertEqual([], ollama.calls)
+
     async def test_blank_five_w_fields_are_reported_deterministically(self) -> None:
         edited = five_w()
         edited["where"] = ""

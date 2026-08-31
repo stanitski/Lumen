@@ -14,7 +14,7 @@ flowchart LR
     I["FastAPI ingress<br/>main.py"] --> C["ChatOnlyService"]
     C --> M["MemoryService"]
     M --> S["MemoryStore"]
-    S --> DB[("SQLite schema v33")]
+    S --> DB[("SQLite schema v34")]
     M --> O["OllamaConnector"]
     C --> X["ContextExecutor"]
     X --> T["TelegramContextService"]
@@ -88,7 +88,9 @@ semantic result inline та не викликають callback.
 structured Ollama call відкидає лише technical/editorial junk і зіставляє
 article з exact user `news_context/topic:*` `dislikes`; другий call для `keep`
 готує 2–4 українські 5W-речення. Результат `keep|skip|retry` містить stable Todo
-key від SHA-256 canonical URL. Один in-flight job має 180-second deadline;
+key від SHA-256 canonical URL. Недоступний article разом із недостатнім RSS
+контекстом є terminal `skip` (`insufficient_source_context`), тоді як timeout,
+модельні та transport failures лишаються `retry`. Один in-flight job має 180-second deadline;
 конкурентний запит отримує `429` і `Retry-After: 60`.
 
 ## Telegram → відповідь
@@ -116,13 +118,33 @@ Text event передається до `ChatOnlyService`; attachment сперш�
 
 ## Reminder flow
 
-`MemoryService.get_contract()` виконує model-driven нормалізацію.
+`MemoryService.get_contract()` виконує лише model-driven нормалізацію.
 `ChatOnlyService` передає reminder contract у
-`ReminderService.intercept_contract()`. Сервіс валідовує дані та сам володіє
-SQLite state machine. `run_due()` claim-ить due rows, викликає
-`DeliveryService.deliver_reminder()`, очікує exact
-`reminder_id` + `delivery_id`, а silence/`no` створює one-shot child.
-`WindowsWakeAdapter` підтримує одну найближчу Task Scheduler задачу.
+`ReminderService.intercept_contract()`. Сервіс сам виконує user- і route-scoped
+пошук, validation, SQLite state transitions та side effects. Contract підтримує
+`create`, `list`, `update`, `pause`, `resume`, `delete`, `snooze`, `select` і
+`confirm_bulk`; selector використовує stable `id`, нормалізований text query або
+короткоживучий session token. Нечіткий/множинний збіг створює persisted
+`reminder_management_sessions`; bulk delete потребує окремого підтвердження.
+
+`delete` — soft cancel root і його активних children; історичні rows не
+видаляються. `pause` і `resume` працюють лише з manual root: recurring resume
+обчислює наступний canonical Kyiv slot, а прострочений one-shot треба спершу
+перенести. Calendar projections (`source_ref`) list-visible, але read-only для
+цього lifecycle.
+
+`run_due()` claim-ить due rows, викликає `DeliveryService.deliver_reminder()`
+і очікує exact `reminder_id` + `delivery_id`. Після configurable grace
+(default 30 хв) one-shot стає `missed`, а recurring root переходить до наступного
+canonical slot. Silence/`no` також завершує occurrence як пропущене: auto-snooze
+немає. Тільки explicit `snooze` створює один child (default 15 хв), який не може
+перетнути наступний recurring slot. Transport retry пише `next_attempt_at`, не
+змінюючи root `due_at`, і припиняється по завершенні grace window.
+
+`WindowsWakeAdapter` підтримує одну найближчу Task Scheduler задачу з
+`WakeToRun`, `StartWhenAvailable`, `AllowStartIfOnBatteries` та
+`DontStopIfGoingOnBatteries`. Повне вимкнення ПК він не компенсує: після запуску
+recovery застосовує звичайну grace policy.
 
 ## Пам’ять і RAG
 
@@ -161,6 +183,9 @@ PyInstaller mode. Публічний шаблон — `.env.example`.
 Calendar read і write вмикаються окремо. Read projection потребує token,
 `HOME_ASSISTANT_CALENDAR_ENTITY_IDS` і canonical target chat. Write потребує
 token і `HOME_ASSISTANT_CALENDAR_WRITE_ENTITY_ID`.
+Reminder lifecycle settings: `REMINDER_GRACE_MINUTES` (default `30`),
+`REMINDER_SNOOZE_MINUTES` (default `15`) і
+`REMINDER_MANAGEMENT_SESSION_TTL_MINUTES` (default `10`).
 
 ## Зовнішні залежності
 
@@ -175,6 +200,8 @@ token і `HOME_ASSISTANT_CALENDAR_WRITE_ENTITY_ID`.
 
 - `ContextExecutor._execute_home_assistant()` і `_execute_knowledge()` — TODO;
 - startup запускає один recovery pass, а не in-process scheduler loop;
+- Windows wake дозволяє запуск на батареї, але не може виконати нагадування,
+  коли ПК повністю вимкнений; recovery не доставляє occurrence старше grace;
 - calendar projection охоплює тільки поточний Kyiv day;
 - DNS перевіряється перед кожним page request/redirect, але transport не pin-ить
   resolved IP, тому DNS rebinding лишається residual risk;

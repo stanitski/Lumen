@@ -68,7 +68,7 @@ Attachment path:
 
 `connector -> SpeechToTextService -> ChatOnlyService`
 
-Немає старого planner/task orchestration layer. Один `GetContract` передає `ReminderService` структуровану дію `create`, `list` або `cancel_list_item`; malformed, timeout або неоднозначний контракт не змінює SQLite. Створення до 10 one-time/daily/weekly root reminders атомарне після строгої перевірки дат, часу, повтору й дублікатів. У schema `v32` root має nullable `parent_reminder_id` лише у дочірніх snooze rows: recurring root зберігає свій початковий `due_at`, а silence або `no` атомарно створює рівно один one-shot child на `+15` хвилин з тим самим текстом, user і allowlisted route. `yes` на child завершує occurrence та просуває root до наступного майбутнього slot від початкового розкладу; child silence або `no` замінює тільки child. List і ordinal snapshot показують лише roots, але для `snoozed` root відображають effective due активного child; cancel root каскадно скасовує active children. Partial unique index і strict idempotent re-read не допускають двох active children. Під час connector creation зберігається allowlisted Telegram route (`target_channel` і canonical numeric `target_chat_id`) у `delivery_route_json`. Scheduled delivery повторно використовує лише цей route через `DeliveryService`, ніколи не виводить destination з `user_id`; legacy row без route не надсилається та лишається pending із bounded 15-minute retries до operator review. Якщо child вичерпує technical delivery retries, eligible recurring root переходить до наступного slot, а one-time або exhausted root стає `failed`, не лишаючись `snoozed`. Текстове підтвердження fired reminder розпізнає `GetContract`, а структурований callback з `reminder_id` і `delivery_id` лишається корельованим детермінованим шляхом.
+Немає старого planner/task orchestration layer. Один `GetContract` передає `ReminderService` typed дії `create`, `list`, `update`, `pause`, `resume`, `delete`, `snooze`, `select` і `confirm_bulk`; legacy `cancel_list_item` лишився compatibility path. Model лише витягає intent/selector/patch, а user-scoped matching, validation і side effects виконує state machine. Exact text або stable ID змінюються одразу; ambiguous і bulk selection використовують короткоживучу route-scoped SQLite session з token та revision preconditions. `delete` є soft cancel, calendar-projected roots read-only. Schema `v34` додає `next_attempt_at`, тому transport retry не змінює canonical `due_at`. Прострочення понад configured 30-minute grace не доставляється: one-shot стає `missed`, recurring переходить до наступного anchored slot. Silence або `no` також завершує occurrence без child; лише explicit `snooze` створює один one-shot child із persisted allowlisted route. List показує canonical slot окремо від explicit snooze/retry. Confirmation fired reminder лишається exact-correlated через `reminder_id` + `delivery_id`.
 
 ## Calendar creation
 
@@ -77,12 +77,14 @@ Attachment path:
 ## Delivery
 
 - async `/chat` і `/connector` доставляють відповідь через `DeliveryService`;
+- звичайний чат визначає `voice` через чинний `MemoryService.should_enable_voice_response`: «вголос»/«вслух» у запиті (без урахування регістру) або збережена голосова перевага користувача вмикає озвучення; без них `voice=false`;
+- цей прапорець передається в `ChatResult` і стандартний callback HA; `skip_memory` не вимикає розпізнавання голосової команди. Окремі acknowledgement-відповіді reminders/calendar не змінюються;
 - inline `/api/chat` і `/api/generate` повертають той самий semantic result без callback;
 - delivery failure не має переписувати semantic answer, лише фіксується окремо в result metadata/logs.
 - reminder delivery є at-least-once, має `reminder_id` і cryptographically random 32-hex `delivery_id`, щоб `reminder_confirmed:<reminder_id>:<delivery_id>` помістився в Telegram callback limit; Home Assistant button передає обидва поля, а ingress передає їх у `/connector` для exact correlated confirmation.
 
 Operator note: після оновлення потрібно rebuild і restart Lumen, щоб
-застосувалась SQLite schema `v33`. Не backfill-ити `delivery_route_json` за
+застосувалась SQLite schema `v34`. Не backfill-ити `delivery_route_json` за
 `user_id`; legacy rows потребують явного підтвердженого route або залишаються
 fail-closed.
 

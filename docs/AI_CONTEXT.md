@@ -17,7 +17,7 @@ Telethon, `faster-whisper` і `pypdf`.
 
 Поточний статус: active chat-memory-knowledge core із двома вузькими
 side-effect integrations — reminders і calendar. Поточна schema:
-`CURRENT_SCHEMA_VERSION = 33`. Зовнішні live integrations після rebuild/restart
+`CURRENT_SCHEMA_VERSION = 34`. Зовнішні live integrations після rebuild/restart
 ще потребують ручної перевірки.
 
 ## 2. Джерела істини
@@ -116,7 +116,9 @@ calendar read проєктує events у reminders.
 RSS text. `NewsProcessingService` відкидає редакційне сміття та exact active
 `news_context/topic:*` `dislikes` користувача, а для `keep` окремо формує
 українську 5W-озвучку. Одночасно виконується лише один job; contention повертає
-`429`, а тимчасові збої — `status=retry`.
+`429`, а тимчасові збої — `status=retry`. Якщо article недоступний і Feedreader
+не надав достатнього контексту, це terminal `skip` з
+`reason_code=insufficient_source_context`, а не нескінченний retry.
 
 ### Telegram і Home Assistant
 
@@ -173,7 +175,7 @@ Generic Home Assistant entity-state read і device control не реалізов
 - Configuration: `Settings` із `.env`; public template — `.env.example`.
 - Persistence: local SQLite tables `conversation_turns`, `memory_facts`,
   `memory_embeddings`, `knowledge_upload_sessions`, `reminders`,
-  `schema_version`.
+  `reminder_management_sessions`, `schema_version`.
 - Background processing: per-request `asyncio.create_task()`, startup reminder
   recovery, long-lived HA calendar listener і one nearest Windows wake task.
 
@@ -183,6 +185,7 @@ Generic Home Assistant entity-state read і device control не реалізов
 |---|---|---|
 | Ollama HTTP | `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_DIALOGUE_MODEL`, `OLLAMA_EMBEDDING_MODEL`, `OLLAMA_TIMEOUT_SECONDS`, `OLLAMA_STREAM_IDLE_TIMEOUT_SECONDS`, `OLLAMA_CLIENT_KEEP_ALIVE` | `OllamaConnector` |
 | SQLite | `LUMEN_DB_PATH` | `Database`, `MemoryStore`, `ReminderService` |
+| Reminder lifecycle | `REMINDER_GRACE_MINUTES`, `REMINDER_SNOOZE_MINUTES`, `REMINDER_MANAGEMENT_SESSION_TTL_MINUTES` | grace для пропущених occurrence, явний snooze, selection/confirmation session |
 | Home Assistant | `HOME_ASSISTANT_URL`, `HOME_ASSISTANT_TOKEN`, `HOME_ASSISTANT_WEBHOOK_ID`, `HOME_ASSISTANT_WEBHOOK_URL` | delivery і calendar services |
 | HA Calendar | `HOME_ASSISTANT_CALENDAR_ENTITY_IDS`, `HOME_ASSISTANT_CALENDAR_WRITE_ENTITY_ID`, `HOME_ASSISTANT_CALENDAR_TARGET_CHAT_ID`, `HOME_ASSISTANT_CALENDAR_ALL_DAY_TIME`, `HOME_ASSISTANT_CALENDAR_RECONNECT_SECONDS`, `HOME_ASSISTANT_CALENDAR_DEFAULT_DURATION_MINUTES` | calendar read/write/projection |
 | Telegram MTProto | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION_PATH`, history/message limits | `TelegramContextService` |
@@ -235,6 +238,14 @@ Lint, type-check і Docker commands у репозиторії не визнач�
 - Reminder destination береться тільки з normalized persisted route, не з
   `user_id`.
 - Confirmation потребує current `reminder_id` і `delivery_id`.
+- Reminder management лишається user- і route-scoped: `GetContract` тільки
+  нормалізує intent, а `ReminderService` шукає, перевіряє та змінює SQLite rows.
+- Корені з `source_ref` є calendar projections: їх показують у списку, але не
+  редагують, не призупиняють, не відкладають і не скасовують локально.
+- `due_at` — canonical schedule. Transport retry зберігається окремо в
+  `next_attempt_at`; він не може зсунути daily/weekly anchor.
+- Непідтверджене occurrence не отримує auto-snooze: silence/`no` позначає його
+  пропущеним. Snooze створюється лише явною командою.
 - Uncertain calendar write не retry-ити автоматично.
 - Calendar target entity задається конфігурацією, не model output.
 - External context bounded, read-only і не повинен прикидатися доступним при
@@ -284,7 +295,7 @@ Lint, type-check і Docker commands у репозиторії не визнач�
 
 1. rebuild/restart current artifact і health/OpenAPI smoke;
 2. live text callback через Home Assistant;
-3. reminder wake, delivery та exact confirmation;
+3. reminder wake, delivery, lifecycle та exact confirmation;
 4. calendar timed/all-day/update/delete і одна навмисна create command;
 5. connector audio/video STT;
 6. approved Telegram source lookup;

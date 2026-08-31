@@ -16,7 +16,14 @@ def run(db_path: str | None = None) -> int:
     settings = Settings()
     database = Database(db_path or settings.lumen_db_path)
     database.init()
-    service = ReminderService(database.session, DeliveryService(settings), WindowsWakeAdapter(db_path=database.db_path))
+    service = ReminderService(
+        database.session,
+        DeliveryService(settings),
+        WindowsWakeAdapter(db_path=database.db_path),
+        missed_grace_minutes=settings.reminder_grace_minutes,
+        default_snooze_minutes=settings.reminder_snooze_minutes,
+        management_session_minutes=settings.reminder_management_session_ttl_minutes,
+    )
     asyncio.run(service.run_due())
     return 0
 

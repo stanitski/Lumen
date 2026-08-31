@@ -2,8 +2,8 @@
 
 ## Статус
 
-Цей документ описує live-код гілки `codex/calendar-reminders` станом на
-2026-07-23. Джерело істини: `src/lumen/main.py` та імпортовані з нього модулі.
+Цей документ описує live-код гілки `codex/ollama-stream-watchdog` станом на
+2026-08-22. Джерело істини: `src/lumen/main.py` та імпортовані з нього модулі.
 
 ## Мета
 
@@ -13,13 +13,13 @@ Ollama, зберігає діалог і доставляє відповідь �
 
 Поверх ядра зараз є дві вузькі side-effect інтеграції:
 
-- `ReminderService` — reminders у SQLite з Windows wake task, доставкою,
-  підтвердженням і snooze;
+- `ReminderService` — повний lifecycle reminders у SQLite з Windows wake task,
+  доставкою, confirmation, pause/resume, soft delete та explicit snooze;
 - `CalendarActionService` та `HomeAssistantCalendarClient` — створення подій
   через Home Assistant і проєкція подій поточного дня у reminders.
 
 Це підтверджено wiring у `src/lumen/main.py`, orchestration у
-`ChatOnlyService.process_chat_request_result()` та schema `v33` у
+`ChatOnlyService.process_chat_request_result()` та schema `v34` у
 `src/lumen/storage/db.py`.
 
 ## Основні можливості
@@ -31,7 +31,7 @@ Ollama, зберігає діалог і доставляє відповідь �
 - knowledge upload та semantic retrieval через `KnowledgeService` і
   `MemoryService.build_planner_context()`;
 - read-only Telegram і web context через `ContextExecutor`;
-- reminder create/list/cancel/confirmation через typed `GetContract`;
+- reminder create/list/update/pause/resume/delete/snooze/confirmation через typed `GetContract`;
 - calendar create через один configured Home Assistant entity;
 - поточноденна calendar projection через HA REST + WebSocket invalidation;
 - callback delivery через `DeliveryService`;

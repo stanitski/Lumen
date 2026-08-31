@@ -192,7 +192,7 @@ class NewsProcessingService:
         elif len(rss_context) >= self.RSS_FALLBACK_MIN_CHARS:
             context, canonical_url, content_source = rss_context, initial_url, "rss"
         else:
-            return self._retry(request, "content_unavailable", "Не вдалося отримати придатний текст новини.")
+            return self._skip_insufficient_context(request, initial_url)
 
         news_id = hashlib.sha256(canonical_url.encode("utf-8")).hexdigest()
         known_dislikes = await self._active_dislikes(user_id)
@@ -349,6 +349,16 @@ class NewsProcessingService:
             published_at=request.published_at if request else None,
             reason_code="invalid_input",
             reason="Відсутній або некоректний заголовок чи URL новини.",
+        )
+
+    @staticmethod
+    def _skip_insufficient_context(request: NewsProcessingRequest, canonical_url: str) -> NewsProcessingResult:
+        return NewsProcessingResult(
+            status="skip",
+            canonical_url=canonical_url,
+            published_at=request.published_at,
+            reason_code="insufficient_source_context",
+            reason="Джерело недоступне, а даних Feedreader недостатньо для достовірної новини.",
         )
 
     @staticmethod

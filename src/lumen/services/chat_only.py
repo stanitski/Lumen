@@ -98,7 +98,7 @@ class ChatOnlyService:
                     callback_metadata=callback_metadata,
                 )
         store_memory = user_id.casefold() != "global" and not self._memory_disabled(payload.metadata, callback_metadata)
-        voice = False
+        voice = self._memory_service.should_enable_voice_response(payload.text, user_id)
         answer = ""
         execution_outcome = "ok"
         try:

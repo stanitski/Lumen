@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 import json
+from unittest.mock import patch
 
 from lumen.config import Settings
 from lumen.services.memory import MemoryService
@@ -182,6 +183,63 @@ class QueryContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("create", valid["action"])
         self.assertEqual("none", malformed["action"])
 
+    def test_reminder_management_contract_normalizes_selector_and_partial_patch(self) -> None:
+        normalized = MemoryService._normalize_reminder_contract({
+            "action": "update",
+            "selector": {"query": "  Пити\t таблетки ", "scope": "one"},
+            "patch": {"text": "  Пити таблетки після сніданку ", "repeat_until": None},
+            "confirmation": "yes",
+        })
+
+        self.assertEqual("update", normalized["action"])
+        self.assertEqual({"query": "пити таблетки", "scope": "one"}, normalized["selector"])
+        self.assertEqual(
+            {"text": "Пити таблетки після сніданку", "repeat_until": None},
+            normalized["patch"],
+        )
+        self.assertEqual([], normalized["items"])
+        self.assertEqual("", normalized["confirmation"])
+
+        selected = MemoryService._normalize_reminder_contract({
+            "action": "select",
+            "selector": {"session_token": "a" * 32, "ordinal": 2},
+        })
+        confirmed = MemoryService._normalize_reminder_contract({
+            "action": "confirm_bulk",
+            "selector": {"session_token": "b" * 32},
+        })
+        snoozed = MemoryService._normalize_reminder_contract({
+            "action": "snooze",
+            "selector": {"id": 7, "scope": "one"},
+            "patch": {"snooze_minutes": 15},
+        })
+        bulk_deleted = MemoryService._normalize_reminder_contract({
+            "action": "delete",
+            "selector": {"scope": "all"},
+        })
+
+        self.assertEqual({"session_token": "a" * 32, "ordinal": 2}, selected["selector"])
+        self.assertEqual({"session_token": "b" * 32}, confirmed["selector"])
+        self.assertEqual({"snooze_minutes": 15}, snoozed["patch"])
+        self.assertEqual({"scope": "all"}, bulk_deleted["selector"])
+
+    def test_reminder_management_contract_rejects_malformed_selector_patch_and_tokens(self) -> None:
+        malformed = (
+            {"action": "update", "selector": {"id": True}, "patch": {"text": "текст"}},
+            {"action": "update", "selector": {"id": 1, "query": "текст"}, "patch": {"text": "текст"}},
+            {"action": "update", "selector": {"id": 1}, "patch": {"recurrence_weekday": 7}},
+            {"action": "update", "selector": {"id": 1}, "patch": {"repeat_until": "not-a-date"}},
+            {"action": "snooze", "selector": {"id": 1}, "patch": {"snooze_minutes": 0}},
+            {"action": "select", "selector": {"session_token": "A" * 32, "ordinal": 1}},
+            {"action": "select", "selector": {"session_token": "a" * 32, "ordinal": "1"}},
+            {"action": "confirm_bulk", "selector": {"session_token": "a" * 32, "scope": "all"}},
+            {"action": "pause", "selector": {"scope": "all"}},
+        )
+
+        for raw in malformed:
+            with self.subTest(raw=raw):
+                self.assertEqual("none", MemoryService._normalize_reminder_contract(raw)["action"])
+
     async def test_multi_time_reminder_discards_spurious_confirmation(self) -> None:
         ollama = FakeOllama(json.dumps({
             "topic": "medication_reminder",
@@ -208,6 +266,19 @@ class QueryContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, len(reminder["items"]))
         self.assertEqual("", reminder["confirmation"])
         self.assertIn("one create item per time", ollama.kwargs["messages"][0]["content"])
+
+    async def test_reminder_prompt_uses_kyiv_date_without_system_local_time(self) -> None:
+        ollama = FakeOllama()
+        service = MemoryService(object(), ollama, Settings())
+
+        with patch("lumen.services.memory.local_now", side_effect=AssertionError("system local time must not be used")):
+            await service.get_contract("Нагадай завтра пити таблетки")
+
+        prompt = ollama.kwargs["messages"][0]["content"]
+        self.assertIn('"action":"none|create|list|update|pause|resume|delete|snooze|select|confirm_bulk"', prompt)
+        self.assertIn("Use Europe/Kyiv for every reminder date and time.", prompt)
+        self.assertIn("Today in the Europe/Kyiv timezone is", prompt)
+        self.assertNotIn("cancel_list_item", prompt)
 
     def test_reminder_list_and_cancel_discard_spurious_confirmation(self) -> None:
         listed = MemoryService._normalize_reminder_contract({"action": "list", "confirmation": "yes"})

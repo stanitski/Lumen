@@ -2,6 +2,52 @@
 
 This file stores durable technical, architectural, database, reporting, integration, naming, and business-logic decisions that future work should reuse instead of rediscovering.
 
+## 2026-08-27 - Не ретраїти недостатній контекст Feedreader
+
+- Context:
+  Недоступне посилання без достатнього title/content/description не дає змоги
+  підготувати достовірну новину, але попередній `retry` залишав такий item у
+  Home Assistant назавжди.
+- Decision:
+  Коли article extraction неуспішний і RSS fallback коротший за 160 символів,
+  `NewsProcessingService` повертає terminal `skip` з
+  `reason_code=insufficient_source_context`. Timeout, model/transport failure
+  та HTTP `429` залишаються retriable.
+- Consequences:
+  Home Assistant видаляє лише неінформативний raw item, не змінюючи сценарій;
+  достатній RSS fallback і звичайне `keep` не зачіпаються.
+- Revisit when:
+  Feedreader почне надавати інший надійний структурований контекст, який можна
+  оцінювати окремо від поточного мінімального обсягу тексту.
+
+## 2026-08-22 - Reminder lifecycle без auto-snooze та schedule drift
+
+- Context:
+  У попередньому lifecycle silence/`no` створював child через 15 хвилин, а
+  delivery retry змінював `due_at`. Після outage або неотриманого повідомлення
+  це могло віднести recurring reminder далеко від його canonical Kyiv slot.
+- Decision:
+  `GetContract` нормалізує тільки intent; `ReminderService` є єдиним owner
+  user-/route-scoped selection, state transition та side effects. Lifecycle
+  підтримує create/list/update/pause/resume/soft delete/explicit snooze.
+  Нечіткі selections і bulk delete використовують persisted 10-minute by-default
+  management sessions із exact candidate IDs та `updated_at` precondition.
+  `source_ref` calendar projections є read-only. Schema `v34` зберігає
+  transport retry в `next_attempt_at`, а `due_at` лишається canonical schedule.
+  Після configurable 30-minute grace stale one-shot стає `missed`, recurring
+  root переходить до next slot, а silence/`no` завершує occurrence без child.
+  Explicit snooze створює один child (default 15 хв) і не перетинає наступний
+  recurring slot.
+- Consequences:
+  Зміна/пауза/видалення скасовують active child і root delivery correlation у
+  `BEGIN IMMEDIATE` transaction; stale selection відмовляється без partial
+  mutation. List показує canonical `due_at`, `paused`, child snooze або
+  `next_attempt_at` окремо. Task Scheduler може wake/start на батареї, але
+  повністю вимкнений ПК обробляється recovery grace policy після запуску.
+- Revisit when:
+  Буде потрібне керування самими HA calendar events, кілька одночасних child
+  occurrence або інший продуктово погоджений snooze policy.
+
 ## 2026-08-18 - Final dialogue uses a progress-based Ollama stream watchdog
 
 - Context:

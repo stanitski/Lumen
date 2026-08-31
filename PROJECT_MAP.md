@@ -23,7 +23,7 @@ Lumen is a local FastAPI assistant with a chat-memory-knowledge core plus isolat
 5. `ContextExecutor` validates optional read-only requests. Telegram and web
    handlers are live; generic Home Assistant state and contract-requested
    knowledge handlers still return `pending_implementation`.
-6. `GetContract` класифікує reminder create/list/cancel-list-item; `ReminderService` зберігає root schedule та one-shot snooze children у SQLite, використовує `DeliveryService` і один nearest Windows wake task.
+6. `GetContract` класифікує `create`, `list`, `update`, `pause`, `resume`, `delete`, explicit `snooze`, `select` і `confirm_bulk`; `ReminderService` зберігає root schedule та optional one-shot snooze child у SQLite, сам робить user-/route-scoped selection і використовує `DeliveryService` та один nearest Windows wake task. Множинний selection і bulk delete мають persisted short-lived confirmation sessions.
 7. Під час створення reminder з connector ingress зберігається лише allowlisted Telegram return route; scheduled delivery повторно використовує його, а не `user_id`.
 8. `HomeAssistantCalendarClient` читає поточний день через HA Calendar REST, слухає `calendar/event/subscribe` через HA WebSocket і проєктує Google Calendar occurrences в одноразові SQLite reminders; all-day події отримують `due_at` о 09:00 `Europe/Kyiv`.
 9. Для явної команди створення `GetContract` формує typed `calendar.create`; `CalendarActionService` один раз викликає HA `calendar.create_event` лише для configured write entity. Конфлікти не перевіряються, відсутній timed end отримує configured 60 хвилин, а успіх одразу запускає authoritative current-day refresh.
@@ -54,7 +54,8 @@ Important endpoints:
   user-only `news_context/topic:*` `dislikes`.
 - `memory_embeddings`: indexed knowledge chunks.
 - `knowledge_upload_sessions`: upload state.
-- `reminders`: isolated reminder state, including `delivery_route_json`, nullable `parent_reminder_id`, and nullable calendar idempotency key `source_ref` from schema `v33`.
+- `reminders`: isolated reminder state, including `delivery_route_json`, nullable `parent_reminder_id`, nullable calendar idempotency key `source_ref` і `next_attempt_at` для transport retry; schema `v34`.
+- `reminder_management_sessions`: короткоживучі user-/route-scoped selection та bulk-confirmation tokens із expected row revision.
 - `schema_version`: schema marker.
 
 ## Current truth
@@ -68,6 +69,7 @@ Historical documents may still mention those subsystems. They are not the source
 - The active process on port `8010` may still be an older binary until a controlled restart is completed.
 - Full live verification against Ollama and Home Assistant remains TBD.
 - `ContextExecutor` still has pending handlers for some source/operation pairs.
-- Calendar projection requires configured `HOME_ASSISTANT_CALENDAR_ENTITY_IDS` and canonical `HOME_ASSISTANT_CALENDAR_TARGET_CHAT_ID`; without both, it stays disabled. A rebuilt and restarted runtime applies schema `v33`.
+- Calendar projection requires configured `HOME_ASSISTANT_CALENDAR_ENTITY_IDS` and canonical `HOME_ASSISTANT_CALENDAR_TARGET_CHAT_ID`; without both, it stays disabled. Projected rows є read-only у reminder lifecycle. A rebuilt and restarted runtime applies schema `v34`.
+- Windows Task Scheduler може wake/start на батареї, але не може доставити reminder за повністю вимкненого ПК. Після запуску rows старші за configurable 30-minute grace не озвучуються пізно.
 - Public URL checks do not pin the resolved TCP address; DNS rebinding remains a
   residual risk. News processing intentionally permits only one in-flight job.

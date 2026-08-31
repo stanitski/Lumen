@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import subprocess
 import sys
 import re
@@ -15,18 +16,23 @@ class WindowsWakeAdapter:
 
     TASK_NAME = "LumenReminderWake"
 
-    def __init__(self, *, db_path: str) -> None:
+    def __init__(self, *, db_path: str, logger: logging.Logger | None = None) -> None:
         self._db_path = db_path
         self._working_directory = str(self._runtime_working_directory())
+        self._logger = logger or logging.getLogger("lumen.reminder_wake")
 
     def schedule(self, due_at: datetime | None) -> None:
         if sys.platform != "win32":
             return
         if due_at is None:
-            self._run_powershell(
+            result = self._run_powershell(
                 "Unregister-ScheduledTask -TaskName "
                 f"{self._powershell_literal(self.TASK_NAME)} -Confirm:$false -ErrorAction SilentlyContinue"
             )
+            if result.returncode:
+                self._logger.warning("Could not remove reminder wake task (exit code %s).", result.returncode)
+            else:
+                self._logger.info("Reminder wake task removed.")
             return
         command = self._wake_command()
         executable, arguments = self._command_parts(command)
@@ -37,7 +43,7 @@ class WindowsWakeAdapter:
             f"-WorkingDirectory {self._powershell_literal(self._working_directory)}; "
             "$trigger = New-ScheduledTaskTrigger -Once "
             f"-At ([datetime]{self._powershell_literal(due_at.astimezone().isoformat())}); "
-            "$settings = New-ScheduledTaskSettingsSet -WakeToRun -StartWhenAvailable -MultipleInstances IgnoreNew; "
+            "$settings = New-ScheduledTaskSettingsSet -WakeToRun -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew; "
             "$principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited; "
             "Register-ScheduledTask "
             f"-TaskName {self._powershell_literal(self.TASK_NAME)} "
@@ -45,7 +51,9 @@ class WindowsWakeAdapter:
         )
         result = self._run_powershell(script)
         if result.returncode:
+            self._logger.warning("Could not schedule reminder wake task (exit code %s).", result.returncode)
             raise RuntimeError((result.stderr or result.stdout or "ScheduledTasks registration failed").strip())
+        self._logger.info("Reminder wake task scheduled for %s.", due_at.isoformat())
 
     @staticmethod
     def _powershell_literal(value: str) -> str:

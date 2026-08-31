@@ -8,7 +8,7 @@
 | `services/chat_only.py` | `ChatOnlyService`, prompt assembly, routing reminder/calendar, persistence/delivery | endpoints → service → memory/context/Ollama/reminder/calendar/delivery | центральний активний orchestrator |
 | `services/memory.py` | `MemoryService`, `GetContract`, retrieval policy, facts, dialogue/knowledge retrieval, news topic dislikes | chat/knowledge/news → store/Ollama | активний, великий і частково має legacy naming (`build_planner_context`) |
 | `memory/store.py` | SQLite queries та in-process cosine search | memory/knowledge/Telegram services | активна частина змішана з legacy intents/skills/tasks API |
-| `storage/db.py` | `Database`, schema `v33`, reminder migrations | `main.py`, wake entrypoint, tests | активний; schema source of truth |
+| `storage/db.py` | `Database`, schema `v34`, reminder migrations і `reminder_management_sessions` | `main.py`, wake entrypoint, tests | активний; schema source of truth |
 | `connectors/ollama.py` | `OllamaConnector.chat()`, `.embed()`, `.healthcheck()` | memory/chat/knowledge | єдиний live LLM provider |
 | `services/context_executor.py` | `ContextExecutor.execute()` і prompt formatting | `ChatOnlyService` → Telegram/web adapters | Telegram/web активні; HA/knowledge handlers pending |
 | `services/telegram_context.py` | allowlisted bounded MTProto reads | `ContextExecutor` → Telethon/STT | активний read-only adapter; не ingress |
@@ -18,8 +18,8 @@
 | `services/file_text.py` | text/PDF/file extraction | `KnowledgeService` | активний helper |
 | `services/speech_to_text.py` | attachment classification, download, ffmpeg, Whisper | `/connector`, Telegram media context | активний; external binaries/models required |
 | `services/delivery.py` | Home Assistant callback payload і chat/reminder delivery | chat/reminders/knowledge | активний transport owner |
-| `services/reminders.py` | `ReminderService`, typed state machine, recurrence/snooze/confirmation | chat/startup/wake/calendar projection | активна ізольована side-effect інтеграція |
-| `services/reminder_wake.py` | `WindowsWakeAdapter` і nearest scheduled task | `ReminderService` | Windows-only active adapter |
+| `services/reminders.py` | `ReminderService`, typed lifecycle/selection state machine, recurrence, explicit snooze, confirmation | chat/startup/wake/calendar projection | активна ізольована side-effect інтеграція; canonical `due_at` не змінюється transport retry |
+| `services/reminder_wake.py` | `WindowsWakeAdapter` і nearest scheduled task | `ReminderService` | Windows-only active adapter; дозволяє wake/start на батареї |
 | `reminder_wakeup.py` | одноразовий wake entrypoint | Task Scheduler → reminder service | активний operational entrypoint |
 | `services/calendar_actions.py` | validate + one-shot HA calendar create | `ChatOnlyService` → HA REST | активний, non-retrying write |
 | `services/home_assistant_calendar.py` | current-day REST snapshot + WebSocket invalidation | startup → HA → calendar projection | активний, conditional on config |
@@ -36,7 +36,7 @@
 - `MemoryStore` methods для intents, skills, tasks, HA entity catalog і routines
   не викликаються live modules;
 - `src/lumen/data/intents.json` і `system_skills.json` не імпортуються;
-- schema `v33` не створює таблиць intents/skills/tasks/HA entities, тому
+- schema `v34` не створює таблиць intents/skills/tasks/HA entities, тому
   відповідні store methods не можуть бути поточним контрактом.
 
 Це обґрунтований висновок про legacy residue, а не дозвіл на автоматичне

@@ -83,6 +83,9 @@ reminder_service = ReminderService(
     delivery_service,
     WindowsWakeAdapter(db_path=database.db_path),
     logger=logger,
+    missed_grace_minutes=settings.reminder_grace_minutes,
+    default_snooze_minutes=settings.reminder_snooze_minutes,
+    management_session_minutes=settings.reminder_management_session_ttl_minutes,
 )
 
 

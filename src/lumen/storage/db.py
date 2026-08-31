@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS reminders (
     delivery_id TEXT NULL,
     delivery_attempts INTEGER NOT NULL DEFAULT 0,
     delivery_lease_until TEXT NULL,
+    next_attempt_at TEXT NULL,
     confirmation_deadline_at TEXT NULL,
     delivery_route_json TEXT NULL,
     parent_reminder_id INTEGER NULL REFERENCES reminders(id),
@@ -120,9 +121,23 @@ ON reminders(status, due_at);
 CREATE INDEX IF NOT EXISTS idx_reminders_user_confirmation
 ON reminders(user_id, status, confirmation_deadline_at);
 
+CREATE TABLE IF NOT EXISTS reminder_management_sessions (
+    token TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    delivery_route_json TEXT NULL,
+    operation TEXT NOT NULL,
+    candidates_json TEXT NOT NULL,
+    patch_json TEXT NOT NULL DEFAULT '{}',
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reminder_management_sessions_expires_at
+ON reminder_management_sessions(expires_at);
+
 """
 
-CURRENT_SCHEMA_VERSION = 33
+CURRENT_SCHEMA_VERSION = 34
 
 
 class Database:
@@ -137,6 +152,7 @@ class Database:
             self._add_reminder_delivery_route_column(connection)
             self._add_reminder_parent_column(connection)
             self._add_reminder_source_ref_column(connection)
+            self._add_reminder_next_attempt_column(connection)
             self._migrate_legacy_reminders(connection)
             connection.execute("DELETE FROM schema_version")
             connection.execute(
@@ -176,6 +192,12 @@ class Database:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_reminders_user_source_ref "
             "ON reminders(user_id, source_ref) WHERE source_ref IS NOT NULL"
         )
+
+    @staticmethod
+    def _add_reminder_next_attempt_column(connection: sqlite3.Connection) -> None:
+        columns = {item["name"] for item in connection.execute("PRAGMA table_info(reminders)").fetchall()}
+        if "next_attempt_at" not in columns:
+            connection.execute("ALTER TABLE reminders ADD COLUMN next_attempt_at TEXT NULL")
 
     @staticmethod
     def _preserve_incompatible_legacy_reminders(connection: sqlite3.Connection) -> None:

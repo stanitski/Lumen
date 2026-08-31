@@ -7,7 +7,7 @@
 
 - rebuild/restart current branch;
 - перевірити port `8010`, `/`, `/openapi.json`;
-- підтвердити primary DB/log paths і schema `v33`;
+- підтвердити primary DB/log paths і schema `v34`;
 - порівняти source commit та deployed artifact.
 
 Залежність: усі подальші live checks мають виконуватися на відомому artifact.
@@ -18,7 +18,7 @@
 
 1. text connector callback;
 2. `/api/chat` і `/api/generate`, stream/non-stream;
-3. reminder wake/delivery/exact confirmation;
+3. reminder lifecycle: management, explicit snooze, grace/missed, wake/delivery/exact confirmation;
 4. HA calendar timed/all-day/update/delete;
 5. одна навмисна calendar create command;
 6. audio/video STT;

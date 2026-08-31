@@ -67,8 +67,9 @@ DB/log paths та `.env`.
 | Telegram context unavailable | allowlisted `messenger_context` facts, kind/ref, credentials/session |
 | Web claim без evidence | `ContextExecutor` result status і supplied URLs |
 | HA state не читається | generic handler pending; не плутати з calendar/delivery paths |
-| Reminder не доставлено | route JSON, status/lease/attempts, wake task, HA callback |
+| Reminder не доставлено або прийшов надто пізно | route JSON, status/lease/attempts/`next_attempt_at`, grace, wake task, HA callback |
 | Confirmation не працює | exact `reminder_id` + current `delivery_id` |
+| Update/delete не застосовано | stable ID/query, management token, route scope, `updated_at` conflict, calendar `source_ref` |
 | Calendar event duplicated | після timeout не retry; перевірити calendar вручну |
 | Calendar reminder не з’явився | token/entities/target config, current-day snapshot, event `uid` |
 | Audio/video ignored | mime/name detection, URL download, ffmpeg, Whisper settings |
@@ -115,6 +116,19 @@ $env:PYTHONPATH='src'
 python -m lumen.reminder_wakeup
 ```
 
+Для reminder drift перевірити в SQLite лише через safe diagnostic tooling:
+`due_at` — canonical Kyiv slot, `next_attempt_at` — тільки наступна transport
+спроба. Значення `missed` означає, що occurrence було старше
+`REMINDER_GRACE_MINUTES` (default `30`) або не підтверджене до deadline; воно
+не повинно автоматично створювати snooze child. Child створює лише explicit
+`snooze`; default керується `REMINDER_SNOOZE_MINUTES` (default `15`).
+
+`LumenReminderWake` реєструється з battery-safe settings. Це не гарантує
+delivery за повністю вимкненого ПК: після увімкнення recovery пропускає
+occurrence поза grace window. Для редагування/паузи/видалення calendar-projected
+row очікувана відповідь — read-only, оскільки `source_ref` належить HA calendar
+projection.
+
 Live calendar create має бути лише навмисним ручним тестом. Не створювати
 автоматичну test event у календарі користувача.
 
@@ -126,6 +140,7 @@ $env:LUMEN_DB_PATH = Join-Path $env:TEMP 'lumen-unittest.db'
 python -m unittest tests.test_chat_only_runtime
 python -m unittest tests.test_query_contract tests.test_context_executor
 python -m unittest tests.test_reminders
+python -m unittest tests.test_reminder_storage tests.test_reminder_wake tests.test_config_reminders
 python -m unittest tests.test_calendar_actions tests.test_home_assistant_calendar tests.test_timezones
 python -m unittest tests.test_ollama_api tests.test_ollama_connector
 python -m unittest tests.test_speech_to_text tests.test_telegram_context

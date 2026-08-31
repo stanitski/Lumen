@@ -7,7 +7,7 @@
 
 - Verify one intentional live calendar-create command through Telegram, including a description and the configured 60-minute default; do not create an automated test event in the user's calendar.
 - Verify one live timed calendar event, one all-day event, one update, and one deletion through HA; the approved main and two Birthdays entities are already configured.
-- Verify one deployed reminder through Windows Task Scheduler wake with the current-user interactive principal, and a structured Home Assistant `reminder_confirmed:<id>:<delivery_id>` callback.
+- Verify one deployed reminder lifecycle: create/list/update/pause/resume/delete, explicit snooze, 30-minute grace recovery, Windows Task Scheduler wake with the current-user interactive principal, and a structured Home Assistant `reminder_confirmed:<id>:<delivery_id>` callback. Do not alter the existing "пити таблетки" reminder during the migration check.
 - Restart the deployed Lumen process from the cleaned source and verify one text message through Home Assistant.
 - Send one audio and one video connector message to verify download, `ffmpeg`, faster-whisper, and chat delivery end to end.
 - Verify existing explicit Telegram source facts and run one live approved-channel and one approved-chat lookup through `/memory` before relying on Telegram context.
@@ -30,6 +30,7 @@
 ## Known risks
 
 - Existing runtime process may use pre-cleanup code until restarted.
+- Windows wake can start on battery but cannot deliver while the PC is fully powered off; recovery intentionally marks occurrence beyond the configured grace as missed.
 - SQLite is local and vector search is in-process; retrieval performance must be rechecked as history grows.
 
 ## Do not touch without explicit approval

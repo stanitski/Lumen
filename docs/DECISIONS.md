@@ -37,7 +37,7 @@
 ## ADR-003: SQLite-backed memory і knowledge
 
 - Рішення: facts, turns, knowledge embeddings і reminders зберігаються у
-  local SQLite schema `v33`; vector similarity рахує `MemoryStore`.
+  local SQLite schema `v34`; vector similarity рахує `MemoryStore`.
 - Причина: потребує підтвердження за межами наявного ledger; реалізація
   підтверджена.
 - Альтернатива: зовнішня vector DB.
@@ -56,10 +56,11 @@
 ## ADR-005: reminders як isolated state machine
 
 - Рішення: `ReminderService` окремо володіє validation, SQLite transitions,
-  wake, delivery, recurrence, confirmation та snooze.
+  wake, delivery, recurrence, confirmation, management sessions і explicit snooze.
 - Причина: reminders без повернення planner/skills/tasks.
 - Альтернатива: generic task executor/scheduler.
-- Наслідки: narrow feature, specialized state machine, schema `v33`.
+- Наслідки: specialized state machine, schema `v34`, soft delete, pause/resume,
+  30-minute missed grace та restart-safe ambiguous/bulk selection.
 - Статус: active.
 
 ## ADR-006: fail-closed reminder routing

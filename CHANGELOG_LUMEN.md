@@ -1,5 +1,58 @@
 # Lumen Change Log
 
+## 2026-08-30
+
+- Fix: відновлено виклик `MemoryService.should_enable_voice_response` у
+  `ChatOnlyService` замість постійного `voice=false`. Команда «вголос»/«вслух»
+  і чинна збережена голосова перевага доходять до стандартного callback HA.
+- Changed files: `src/lumen/services/chat_only.py`,
+  `tests/test_chat_only_runtime.py`, `docs/CHAT_ONLY_RUNTIME_CONTRACT_UA.md`.
+- Verification: regression coverage перевіряє реальну voice policy та
+  `DeliveryService` для async/inline, звичайного тексту і `skip_memory`.
+  Пройшли 27 tests (`test_chat_only_runtime`, `test_ollama_api`, isolated DB
+  та вимкнений calendar listener). Оновлений EXE: `/openapi.json` HTTP 200;
+  live `/connector` test отримав callback `voice=true`, HA виконав Talk-2
+  і `tts.speak` без помилок. Контрольні суми трьох YAML-файлів HA незмінні.
+- Runtime risk: low. HA/Talk-2, Telegram retrieval, маршрутизація та окремі
+  reminder/calendar acknowledgements не змінені. Rebuild/restart EXE виконано;
+  попередній EXE збережено в `data/backups/voice-fix-20260830-124410/`.
+
+## 2026-08-27
+
+- Type: Terminal rejection of insufficient Feedreader context
+- Changed files: `src/lumen/services/news_processing.py`,
+  `tests/test_news_processing.py`, news-processing architecture and decision docs.
+- Reason: an inaccessible article with too little Feedreader text cannot become a
+  trustworthy news brief, so return terminal `skip` instead of retaining it for
+  an endless retry cycle in Home Assistant.
+- Runtime risk: low. Valid RSS fallback stays available; only
+  `insufficient_source_context` becomes terminal. Timeouts, Lumen/model
+  failures and HTTP `429` remain retriable.
+
+## 2026-08-22
+
+- Type: Повний reminder lifecycle і усунення зсуву schedule
+- Changed files: `src/lumen/services/memory.py`, `src/lumen/services/reminders.py`,
+  `src/lumen/storage/db.py`, `src/lumen/config.py`, `src/lumen/main.py`,
+  `src/lumen/reminder_wakeup.py`, `src/lumen/services/reminder_wake.py`, focused
+  tests, `.env.example` і current runtime docs.
+- Reason: GetContract тепер описує typed `update`, `pause`, `resume`, soft
+  `delete`, explicit `snooze`, persisted selection і bulk confirmation; actual
+  lookup/validation/mutation лишається в `ReminderService`. Schema `v34` додає
+  `next_attempt_at` для transport retry та `reminder_management_sessions` із
+  user-/route-scoped token і expected revision. Missed occurrence не
+  auto-snooze: після configurable 30-minute grace one-shot має `missed`, а
+  recurring root повертається до next canonical Kyiv slot. Retry не змінює
+  `due_at`; snooze є лише явним і за замовчуванням становить 15 хв.
+- Runtime risk: medium. Потрібні rebuild/restart для schema `v34` і нових
+  settings. Windows task тепер дозволяє wake/start на батареї, але не може
+  доставити reminder за повністю вимкненого ПК; live deployment verification
+  не виконувалась у межах цієї зміни.
+- Fix: contract-driven `delete + selector.scope=all` більше не відкидається
+  через відсутність `id/query`; bulk confirmation показує точні stable `#ID`
+  і лише після token confirmation виконує soft delete. Phrase-specific parsing
+  або hardcoded українські команди не додавались.
+
 ## 2026-08-18
 
 - Type: progress-based Ollama streaming watchdog

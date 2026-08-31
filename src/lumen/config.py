@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     telegram_default_message_limit: int = 30
     telegram_channel_history_hours: int = 4
     telegram_dialog_history_hours: int = 48
+    reminder_grace_minutes: int = 30
+    reminder_snooze_minutes: int = 15
+    reminder_management_session_ttl_minutes: int = 10
 
     @field_validator("log_file_path", "lumen_db_path", "ollama_debug_dump_path", "telegram_session_path", mode="after")
     @classmethod
@@ -95,6 +98,17 @@ class Settings(BaseSettings):
     def _validate_calendar_default_duration(cls, value: int) -> int:
         if not 1 <= value <= 1440:
             raise ValueError("HOME_ASSISTANT_CALENDAR_DEFAULT_DURATION_MINUTES must be between 1 and 1440")
+        return value
+
+    @field_validator(
+        "reminder_grace_minutes",
+        "reminder_snooze_minutes",
+        "reminder_management_session_ttl_minutes",
+    )
+    @classmethod
+    def _validate_positive_reminder_minutes(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("Reminder timing settings must be greater than zero")
         return value
 
     @property

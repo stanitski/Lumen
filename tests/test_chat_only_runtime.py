@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 from datetime import datetime, timedelta
+from unittest.mock import AsyncMock, Mock
 
 from lumen.config import Settings
 from lumen.connectors.ollama import OllamaStreamIdleTimeout, OllamaStreamProtocolError
@@ -10,6 +11,7 @@ from lumen.models import ChatRequest, ConversationTurnRecord, EmbeddingHit
 from lumen.services.chat_only import ChatOnlyService
 from lumen.services.calendar_actions import CalendarActionResult, CalendarCreateRequest
 from lumen.services.context_executor import ContextExecutionResult
+from lumen.services.delivery import DeliveryService
 from lumen.services.memory import MemoryService
 from lumen.services.reminders import ReminderInterception
 
@@ -226,6 +228,51 @@ class FakeContextExecutor:
 
 
 class ChatOnlyServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_chat_voice_policy_reaches_result_and_callback(self) -> None:
+        cases = (
+            ("Коротко поясни причину тривоги і відповідай вголос.", [], True),
+            ("Відповідай ВГОЛОС.", [], True),
+            ("Ответь вслух.", [], True),
+            ("Коротко поясни причину тривоги.", [], False),
+            ("Привіт", [{"id": 1, "value": "Відповідати вголос"}], True),
+        )
+        for text, facts, expected_voice in cases:
+            for deliver in (True, False):
+                with self.subTest(text=text, deliver=deliver):
+                    store = Mock()
+                    store.list_facts.return_value = facts
+                    settings = Settings()
+                    ollama = FakeOllama()
+                    policy = MemoryService(store=store, ollama=ollama, settings=settings)
+                    memory = FakeMemoryService()
+                    memory.should_enable_voice_response = policy.should_enable_voice_response
+                    delivery = DeliveryService(settings)
+                    delivery.post_home_assistant_callback = AsyncMock()
+                    service = ChatOnlyService(
+                        ollama=ollama, memory_service=memory,
+                        delivery_service=delivery, settings=settings,
+                    )
+                    route = {"source": "home_assistant"}
+
+                    result = await service.process_chat_request_result(
+                        ChatRequest(text=text, user_id="test-user", metadata={"skip_memory": True}),
+                        "voice-regression", deliver=deliver, callback_metadata=route,
+                    )
+
+                    self.assertEqual(expected_voice, result.voice)
+                    self.assertEqual(deliver, result.delivered)
+                    self.assertEqual("skipped", result.persistence_outcome)
+                    self.assertEqual({}, memory.stored_turn)
+                    if deliver:
+                        delivery.post_home_assistant_callback.assert_awaited_once()
+                        callback = delivery.post_home_assistant_callback.await_args.args[0]
+                        self.assertEqual(expected_voice, callback.voice)
+                        self.assertEqual(result.answer, callback.answer)
+                        self.assertEqual("voice-regression", callback.request_id)
+                        self.assertEqual("home_assistant", callback.metadata["source"])
+                    else:
+                        delivery.post_home_assistant_callback.assert_not_awaited()
+
     def test_reminder_route_allowlist_rejects_invalid_values(self) -> None:
         self.assertEqual(
             {"target_channel": "telegram", "target_chat_id": "-1001234567890"},

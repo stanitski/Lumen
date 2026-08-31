@@ -1642,7 +1642,7 @@ class MemoryService:
             "time_scope": "none",
             "completeness": "normal",
             "context_sources": [],
-            "reminder": {"action": "none", "items": [], "delete_ordinal": None, "confirmation": ""},
+            "reminder": {"action": "none", "items": [], "selector": {}, "patch": {}, "delete_ordinal": None, "confirmation": ""},
             "calendar": {"action": "none", "item": {}},
         }
 
@@ -1722,29 +1722,34 @@ class MemoryService:
             return ""
 
     async def get_contract(self, text: str, *, routing_context: str = "") -> dict[str, object]:
+        kyiv_today = datetime.now(kyiv_timezone()).date().isoformat()
         payload = await self._ollama.chat(
             messages=[
                 {
                     "role": "system",
                     "content": (
                         "Analyze the user request. Return ONLY JSON with this exact shape: "
-                        '{"topic":"lowercase_english_snake_case_or_empty","answer_mode":"direct_answer|explain|list_records|summarize|compare|find|calculate|continue_context|create_or_update","time_scope":"today|yesterday|explicit_period|none","completeness":"normal|complete","context_sources":[{"source":"telegram|web|home_assistant|knowledge","operation":"search|read_state","query":"short search query","scope":"approved_chats|explicit_chat|default","source_kind":"user|group|channel|unspecified","date_from":"YYYY-MM-DD_or_empty","date_to":"YYYY-MM-DD_or_empty"}],"reminder":{"action":"none|create|list|cancel_list_item","items":[{"text":"action","date":"YYYY-MM-DD","time":"HH:MM","recurrence_kind":"none|daily|weekly","recurrence_weekday":"0_to_6_or_null","repeat_until":"YYYY-MM-DD_or_empty"}],"delete_ordinal":"positive_integer_or_null","confirmation":"yes|no_or_empty"},"calendar":{"action":"none|create","item":{"summary":"event title","description":"optional description","location":"optional location","all_day":"boolean","start":"aware ISO datetime or YYYY-MM-DD","end":"aware ISO datetime, YYYY-MM-DD, or empty"}}}. '
+                        '{"topic":"lowercase_english_snake_case_or_empty","answer_mode":"direct_answer|explain|list_records|summarize|compare|find|calculate|continue_context|create_or_update","time_scope":"today|yesterday|explicit_period|none","completeness":"normal|complete","context_sources":[{"source":"telegram|web|home_assistant|knowledge","operation":"search|read_state","query":"short search query","scope":"approved_chats|explicit_chat|default","source_kind":"user|group|channel|unspecified","date_from":"YYYY-MM-DD_or_empty","date_to":"YYYY-MM-DD_or_empty"}],"reminder":{"action":"none|create|list|update|pause|resume|delete|snooze|select|confirm_bulk","items":[{"text":"action","date":"YYYY-MM-DD","time":"HH:MM","recurrence_kind":"none|daily|weekly","recurrence_weekday":"0_to_6_or_null","repeat_until":"YYYY-MM-DD_or_empty"}],"selector":{"id":"positive_integer_optional","query":"normalized_text_optional","session_token":"hex_token_optional","ordinal":"positive_integer_optional","scope":"one|all_optional"},"patch":{"text":"string_optional","date":"YYYY-MM-DD_optional","time":"HH:MM_optional","recurrence_kind":"none|daily|weekly|null_optional","recurrence_weekday":"0_to_6_or_null_optional","repeat_until":"YYYY-MM-DD_or_null_optional","snooze_minutes":"positive_integer_optional"},"confirmation":"yes|no_or_empty"},"calendar":{"action":"none|create","item":{"summary":"event title","description":"optional description","location":"optional location","all_day":"boolean","start":"aware ISO datetime or YYYY-MM-DD","end":"aware ISO datetime, YYYY-MM-DD, or empty"}}}. '
                         "Use an empty topic only for greetings, small talk, or ambiguous text. "
                         "Use list_records when the user asks to enumerate recorded items, and complete when no relevant confirmed item may be omitted. "
                         "Add context_sources only when the answer requires external Telegram, web, Home Assistant, or uploaded-knowledge data. "
                         "When the user directly asks to read, review, search, or summarize Telegram channels, groups, chats, or a contact, add telegram/search. "
                         "For a request about plural channels, use source_kind=channel and scope=approved_chats when approved channel sources are available. "
-                        "For a request about today, set date_from and date_to to today's local date. "
+                        "For a request about today, set date_from and date_to to today's Europe/Kyiv date. "
                         "Example when approved channels are available: user='Переглянь телеграм канали за сьогодні' -> "
-                        f"{{\"topic\":\"telegram_channel_review\",\"answer_mode\":\"summarize\",\"time_scope\":\"today\",\"completeness\":\"normal\",\"context_sources\":[{{\"source\":\"telegram\",\"operation\":\"search\",\"query\":\"recent channel messages\",\"scope\":\"approved_chats\",\"source_kind\":\"channel\",\"date_from\":\"{local_now().date().isoformat()}\",\"date_to\":\"{local_now().date().isoformat()}\"}}]}}. "
+                        f"{{\"topic\":\"telegram_channel_review\",\"answer_mode\":\"summarize\",\"time_scope\":\"today\",\"completeness\":\"normal\",\"context_sources\":[{{\"source\":\"telegram\",\"operation\":\"search\",\"query\":\"recent channel messages\",\"scope\":\"approved_chats\",\"source_kind\":\"channel\",\"date_from\":\"{kyiv_today}\",\"date_to\":\"{kyiv_today}\"}}]}}. "
                         "Never return empty context_sources for that request when approved channel sources are listed. "
                         "Allowed pairs are telegram/search, web/search, home_assistant/read_state, and knowledge/search. "
-                        f"Today in the user's local timezone is {local_now().date().isoformat()}. "
+                        f"Today in the Europe/Kyiv timezone is {kyiv_today}. "
                         "For Telegram, use source_kind=user for a person's private chat, group for a group chat, channel for news or broadcast channels, and unspecified only when the user gave no type. "
                         "For an explicit date or date range, set inclusive date_from and date_to as ISO calendar dates; otherwise leave both empty. "
-                        "Only create when every item is unambiguous. Use cancel_list_item only for an explicit displayed ordinal; never infer all-reminder deletion. "
-                        "Reminder action and confirmation are mutually exclusive: set confirmation yes/no only when action is none; for create, list, or cancel_list_item set confirmation empty. "
-                        f"For one shared daily action with multiple times, return one create item per time with the same text and recurrence_kind=daily. Example: user='daily at 10:30 and 23:30 remind me to take medicine' -> {{\"reminder\":{{\"action\":\"create\",\"items\":[{{\"text\":\"take medicine\",\"date\":\"{local_now().date().isoformat()}\",\"time\":\"10:30\",\"recurrence_kind\":\"daily\",\"recurrence_weekday\":null,\"repeat_until\":\"\"}},{{\"text\":\"take medicine\",\"date\":\"{local_now().date().isoformat()}\",\"time\":\"23:30\",\"recurrence_kind\":\"daily\",\"recurrence_weekday\":null,\"repeat_until\":\"\"}}],\"delete_ordinal\":null,\"confirmation\":\"\"}}}}. "
+                        "Use Europe/Kyiv for every reminder date and time. Only create when every item is unambiguous. "
+                        "For update, pause, resume, delete, or snooze, use selector.id for a known stable ID or selector.query for normalized reminder text. "
+                        "If several reminders may match, do not guess: use select with selector.session_token plus selector.ordinal after the service displayed candidates. "
+                        "Use selector.scope=all only for an explicit bulk request; delete with scope=all always needs a later confirm_bulk with its session token. "
+                        "Use patch only for update (one or more changed fields) or snooze (optional snooze_minutes); omitted patch fields must stay absent, while null clears only recurrence_kind, recurrence_weekday, or repeat_until. "
+                        "Reminder action and delivery confirmation are distinct: set confirmation yes/no only when action is none; set it empty for every reminder management action. "
+                        f"For one shared daily action with multiple times, return one create item per time with the same text and recurrence_kind=daily. Example: user='daily at 10:30 and 23:30 remind me to take medicine' -> {{\"reminder\":{{\"action\":\"create\",\"items\":[{{\"text\":\"take medicine\",\"date\":\"{kyiv_today}\",\"time\":\"10:30\",\"recurrence_kind\":\"daily\",\"recurrence_weekday\":null,\"repeat_until\":\"\"}},{{\"text\":\"take medicine\",\"date\":\"{kyiv_today}\",\"time\":\"23:30\",\"recurrence_kind\":\"daily\",\"recurrence_weekday\":null,\"repeat_until\":\"\"}}],\"selector\":{{}},\"patch\":{{}},\"confirmation\":\"\"}}}}. "
                         "Set confirmation yes/no only for an unambiguous plain reply to a fired reminder. "
                         "Set calendar.action=create only for an explicit command to add one event to the calendar; do not infer creation from questions or suggestions. "
                         "An explicit calendar creation command has priority over unrelated retrieval examples: when calendar.action=create, keep context_sources empty and reminder.action=none. "
@@ -1754,8 +1759,8 @@ class MemoryService:
                         "If description or location was not explicitly supplied, return an empty string for that field. "
                         "For timed events use an ISO datetime with an explicit UTC offset for start and end; end may be empty so the service can apply its configured 60-minute duration. "
                         "For all-day events use an ISO date for start; end may be empty so the service uses start plus one day, or an explicit later ISO date as the exclusive end. "
-                        f"Example: user='Додай у календар {local_now().date().isoformat()} о 15:00 зустріч з Іваном, опис: обговорити проєкт' -> {{\"calendar\":{{\"action\":\"create\",\"item\":{{\"summary\":\"Зустріч з Іваном\",\"description\":\"Обговорити проєкт\",\"location\":\"\",\"all_day\":false,\"start\":\"{datetime.combine(local_now().date(), datetime.min.time().replace(hour=15), tzinfo=kyiv_timezone()).isoformat()}\",\"end\":\"\"}}}}}}. "
-                        f"Example: user='Додай у календар на весь день {local_now().date().isoformat()} подію День народження Марії' -> {{\"calendar\":{{\"action\":\"create\",\"item\":{{\"summary\":\"День народження Марії\",\"description\":\"\",\"location\":\"\",\"all_day\":true,\"start\":\"{local_now().date().isoformat()}\",\"end\":\"\"}}}}}}."
+                        f"Example: user='Додай у календар {kyiv_today} о 15:00 зустріч з Іваном, опис: обговорити проєкт' -> {{\"calendar\":{{\"action\":\"create\",\"item\":{{\"summary\":\"Зустріч з Іваном\",\"description\":\"Обговорити проєкт\",\"location\":\"\",\"all_day\":false,\"start\":\"{datetime.combine(date.fromisoformat(kyiv_today), datetime.min.time().replace(hour=15), tzinfo=kyiv_timezone()).isoformat()}\",\"end\":\"\"}}}}}}. "
+                        f"Example: user='Додай у календар на весь день {kyiv_today} подію День народження Марії' -> {{\"calendar\":{{\"action\":\"create\",\"item\":{{\"summary\":\"День народження Марії\",\"description\":\"\",\"location\":\"\",\"all_day\":true,\"start\":\"{kyiv_today}\",\"end\":\"\"}}}}}}."
                     ),
                 },
                 *([{"role": "system", "content": routing_context}] if routing_context else []),
@@ -1782,15 +1787,28 @@ class MemoryService:
             "calendar": self._normalize_calendar_contract(raw.get("calendar")),
         }
 
-    @staticmethod
-    def _normalize_reminder_contract(raw: object) -> dict[str, object]:
-        default = {"action": "none", "items": [], "delete_ordinal": None, "confirmation": ""}
+    @classmethod
+    def _normalize_reminder_contract(cls, raw: object) -> dict[str, object]:
+        default = {"action": "none", "items": [], "selector": {}, "patch": {}, "delete_ordinal": None, "confirmation": ""}
         if not isinstance(raw, dict):
             return default
-        action = str(raw.get("action", "none")).strip().lower()
-        confirmation = str(raw.get("confirmation", "")).strip().lower()
+        action_value = raw.get("action", "none")
+        confirmation_value = raw.get("confirmation", "")
+        if not isinstance(action_value, str) or not isinstance(confirmation_value, str):
+            return default
+        action = action_value.strip().lower()
+        confirmation = confirmation_value.strip().lower()
+        if action not in {"none", "create", "list", "update", "pause", "resume", "delete", "snooze", "select", "confirm_bulk", "cancel_list_item"}:
+            return default
         if confirmation not in {"", "yes", "no"}:
             return default
+        if action == "none":
+            return {**default, "confirmation": confirmation}
+        if action == "create":
+            items = raw.get("items")
+            if not isinstance(items, list) or not items or any(not isinstance(item, dict) for item in items):
+                return default
+            return {**default, "action": action, "items": items}
         if action == "list":
             return {**default, "action": action}
         if action == "cancel_list_item":
@@ -1798,9 +1816,130 @@ class MemoryService:
             if not isinstance(ordinal, int) or isinstance(ordinal, bool) or ordinal < 1:
                 return default
             return {**default, "action": action, "delete_ordinal": ordinal}
-        if action == "create" and isinstance(raw.get("items"), list):
-            return {**default, "action": action, "items": raw["items"]}
-        return {**default, "confirmation": confirmation}
+
+        selector = cls._normalize_reminder_selector(
+            raw.get("selector"),
+            allow_scope_only=action == "delete",
+        )
+        if selector is None:
+            return default
+        if action == "update":
+            patch = cls._normalize_reminder_patch(raw.get("patch"), allowed_keys={"text", "date", "time", "recurrence_kind", "recurrence_weekday", "repeat_until"})
+            if not patch:
+                return default
+            return {**default, "action": action, "selector": selector, "patch": patch}
+        if action == "snooze":
+            patch = cls._normalize_reminder_patch(raw.get("patch", {}), allowed_keys={"snooze_minutes"})
+            if patch is None:
+                return default
+            return {**default, "action": action, "selector": selector, "patch": patch}
+        if action == "select":
+            if raw.get("patch", {}) != {}:
+                return default
+            if set(selector) != {"session_token", "ordinal"}:
+                return default
+            return {**default, "action": action, "selector": selector}
+        if action == "confirm_bulk":
+            if raw.get("patch", {}) != {}:
+                return default
+            if set(selector) != {"session_token"}:
+                return default
+            return {**default, "action": action, "selector": selector}
+        if raw.get("patch", {}) != {}:
+            return default
+        if "session_token" in selector or "ordinal" in selector:
+            return default
+        return {**default, "action": action, "selector": selector}
+
+    @staticmethod
+    def _normalize_reminder_selector(
+        raw: object,
+        *,
+        allow_scope_only: bool = False,
+    ) -> dict[str, object] | None:
+        if not isinstance(raw, dict) or not raw or set(raw) - {"id", "query", "session_token", "ordinal", "scope"}:
+            return None
+        selector: dict[str, object] = {}
+        identifier = raw.get("id")
+        if "id" in raw:
+            if not isinstance(identifier, int) or isinstance(identifier, bool) or identifier < 1:
+                return None
+            selector["id"] = identifier
+        if "query" in raw:
+            query = MemoryService._normalize_reminder_text(raw["query"], limit=1000, casefold=True)
+            if not query:
+                return None
+            selector["query"] = query
+        if "session_token" in raw:
+            token = raw["session_token"]
+            if not isinstance(token, str) or not re.fullmatch(r"[a-f0-9]{32}", token):
+                return None
+            selector["session_token"] = token
+        if "ordinal" in raw:
+            ordinal = raw["ordinal"]
+            if not isinstance(ordinal, int) or isinstance(ordinal, bool) or ordinal < 1:
+                return None
+            selector["ordinal"] = ordinal
+        if "scope" in raw:
+            scope = raw["scope"]
+            if not isinstance(scope, str) or scope not in {"one", "all"}:
+                return None
+            selector["scope"] = scope
+        scope_only = allow_scope_only and selector == {"scope": "all"}
+        if (
+            not scope_only
+            and not {"id", "query", "session_token"}.intersection(selector)
+        ) or ("id" in selector and "query" in selector):
+            return None
+        if "ordinal" in selector and "session_token" not in selector:
+            return None
+        return selector
+
+    @staticmethod
+    def _normalize_reminder_patch(raw: object, *, allowed_keys: set[str]) -> dict[str, object] | None:
+        if not isinstance(raw, dict) or set(raw) - allowed_keys:
+            return None
+        patch: dict[str, object] = {}
+        for key, value in raw.items():
+            if key == "text":
+                text = MemoryService._normalize_reminder_text(value, limit=1000)
+                if not text:
+                    return None
+                patch[key] = text
+            elif key == "date":
+                if not isinstance(value, str) or not MemoryService._normalize_contract_date(value):
+                    return None
+                patch[key] = MemoryService._normalize_contract_date(value)
+            elif key == "time":
+                if not isinstance(value, str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value.strip()):
+                    return None
+                patch[key] = value.strip()
+            elif key == "recurrence_kind":
+                if value is not None and (not isinstance(value, str) or value not in {"none", "daily", "weekly"}):
+                    return None
+                patch[key] = value
+            elif key == "recurrence_weekday":
+                if value is not None and (not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 6):
+                    return None
+                patch[key] = value
+            elif key == "repeat_until":
+                if value is not None and (not isinstance(value, str) or not MemoryService._normalize_contract_date(value)):
+                    return None
+                patch[key] = None if value is None else MemoryService._normalize_contract_date(value)
+            elif key == "snooze_minutes":
+                if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 1440:
+                    return None
+                patch[key] = value
+        return patch
+
+    @staticmethod
+    def _normalize_reminder_text(value: object, *, limit: int, casefold: bool = False) -> str:
+        if not isinstance(value, str):
+            return ""
+        normalized = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", value)).strip()
+        if not normalized or len(normalized) > limit:
+            return ""
+        return normalized.casefold() if casefold else normalized
 
     @staticmethod
     def _normalize_calendar_contract(raw: object) -> dict[str, object]:

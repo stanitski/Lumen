@@ -80,7 +80,7 @@
 ## Винятки і борг
 
 - `run.bat` не відповідає типовому Windows batch syntax;
-- `MemoryStore` містить методи до таблиць, яких немає у schema `v33`;
+- `MemoryStore` містить legacy methods до таблиць, яких немає у schema `v34`;
 - legacy Pydantic models і JSON seeds не відображають current architecture;
 - коментарі/імена з `planner` можуть означати retrieval contract, а не active
   planner subsystem.

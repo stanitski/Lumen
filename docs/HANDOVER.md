@@ -1,13 +1,21 @@
 # Передача поточного стану
 
-Дата аудиту: 2026-07-23. Гілка: `codex/calendar-reminders`, commit
+Дата базового аудиту: 2026-07-23. Гілка: `codex/calendar-reminders`, commit
 `0060a2a` (`Add calendar-backed reminders and event creation`).
+
+Після цього аудиту в робочому дереві підготовлено (але тут не live-verified)
+schema `v34` і повний локальний reminder lifecycle: management actions,
+persisted selection/bulk-confirmation sessions, `paused`/`missed`, explicit-only
+snooze, anchored `next_attempt_at` retry та battery-safe Windows wake settings.
+Calendar projections лишаються read-only. Передавати це як source change, що
+потребує rebuild/restart і окремого live verification, а не як підтверджений
+deployed стан.
 
 ## Підтверджені останні зміни
 
 За `git show 0060a2a`, live-кодом і tests:
 
-- додано ізольований `ReminderService` зі schema `v33`, recurrence,
+- базовий commit додав ізольований `ReminderService` зі schema `v33`, recurrence,
   correlated confirmation, snooze children і fail-closed delivery route;
 - додано `WindowsWakeAdapter` та `lumen.reminder_wakeup`;
 - додано current-day Google Calendar projection через Home Assistant REST +
@@ -60,7 +68,7 @@ Historical reasons до fresh Git baseline не завжди можна пере
 
 1. Rebuild/restart і health/openapi smoke.
 2. Live text callback через Home Assistant.
-3. Live reminder wake + exact confirmation.
+3. Live reminder lifecycle: management, grace/missed, explicit snooze, wake + exact confirmation.
 4. Live calendar read/update/delete і одна навмисна create command.
 5. STT audio/video.
 6. Telegram allowed source lookup.
