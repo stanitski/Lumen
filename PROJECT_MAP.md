@@ -19,17 +19,17 @@ Lumen is a local FastAPI assistant with a chat-memory-knowledge core plus isolat
 1. `POST /chat` starts `ChatOnlyService`.
 2. `POST /connector` accepts text or STT-supported attachments.
 3. Audio/video attachments are normalized with `ffmpeg`, transcribed by `faster-whisper`, then routed into the same text chat path.
-4. `MemoryService` retrieves relevant facts, dialogue evidence, and knowledge evidence and builds a query contract.
+4. `MemoryService` builds a query contract and retrieves dialogue/knowledge evidence. Its `FactContextService` reads mandatory personal rules separately and combines semantic/lexical retrieval for contextual facts. Shared `memory/fact_policy.py` defines the reserved marker and canonical content hash.
 5. `ContextExecutor` validates optional read-only requests. Telegram and web
    handlers are live; generic Home Assistant state and contract-requested
    knowledge handlers still return `pending_implementation`.
 6. `GetContract` класифікує `create`, `list`, `update`, `pause`, `resume`, `delete`, explicit `snooze`, `select` і `confirm_bulk`; `ReminderService` зберігає root schedule та optional one-shot snooze child у SQLite, сам робить user-/route-scoped selection і використовує `DeliveryService` та один nearest Windows wake task. Множинний selection і bulk delete мають persisted short-lived confirmation sessions.
 7. Під час створення reminder з connector ingress зберігається лише allowlisted Telegram return route; scheduled delivery повторно використовує його, а не `user_id`.
-8. `HomeAssistantCalendarClient` читає поточний день через HA Calendar REST, слухає `calendar/event/subscribe` через HA WebSocket і проєктує Google Calendar occurrences в одноразові SQLite reminders; all-day події отримують `due_at` о 09:00 `Europe/Kyiv`.
+8. `HomeAssistantCalendarClient` читає поточний день через HA Calendar REST, слухає `calendar/event/subscribe` через HA WebSocket і проєктує calendar occurrences в одноразові SQLite reminders; all-day notification time задає `HOME_ASSISTANT_CALENDAR_ALL_DAY_TIME` (default 09:00 `Europe/Kyiv`).
 9. Для явної команди створення `GetContract` формує typed `calendar.create`; `CalendarActionService` один раз викликає HA `calendar.create_event` лише для configured write entity. Конфлікти не перевіряються, відсутній timed end отримує configured 60 хвилин, а успіх одразу запускає authoritative current-day refresh.
-10. Ollama generates the final answer.
-11. The turn is persisted, then post-processing extracts stable facts and updates dialogue metadata.
-12. `DeliveryService` sends callback responses through Home Assistant; Ollama-compatible routes return inline.
+10. For ordinary chat, Ollama generates the final answer; handled reminder/calendar actions return deterministic responses before that call.
+11. The ordinary turn is persisted unless the user is `global` or a memory-suppression metadata flag is enabled; `DeliveryService` then sends callback responses through Home Assistant when requested.
+12. Stored-turn post-processing extracts stable facts/inclusion policy, updates dialogue metadata, and indexes missing or changed contextual facts. Ollama-compatible routes return inline after processing without callback. `scripts/prepare_fact_memory.py` provides a backed-up operator manifest application and initial index backfill.
 13. `POST /news/process` opens one Feedreader article through the shared bounded
     `WebPageExtractor`, applies editorial junk filtering and user-only news
     topic `dislikes`, then returns `keep|skip|retry` with a narration-ready Todo
@@ -52,7 +52,7 @@ Important endpoints:
 - `conversation_turns`: dialogue pairs plus retrieval metadata and embeddings.
 - `memory_facts`: stable user facts and preferences, including permanent
   user-only `news_context/topic:*` `dislikes`.
-- `memory_embeddings`: indexed knowledge chunks.
+- `memory_embeddings`: indexed knowledge chunks and separately scoped `memory_fact` vectors; schema unchanged.
 - `knowledge_upload_sessions`: upload state.
 - `reminders`: isolated reminder state, including `delivery_route_json`, nullable `parent_reminder_id`, nullable calendar idempotency key `source_ref` і `next_attempt_at` для transport retry; schema `v34`.
 - `reminder_management_sessions`: короткоживучі user-/route-scoped selection та bulk-confirmation tokens із expected row revision.
@@ -60,7 +60,9 @@ Important endpoints:
 
 ## Current truth
 
-The current runtime does not use planner, skills, tasks, policy execution, scheduler loops, or smart-home control. Reminders are the one isolated optional integration; they do not restore those subsystems.
+The current runtime does not use planner, skills, tasks, policy execution, scheduler loops, or smart-home control. Reminders, calendar actions/projection, and news processing are isolated integrations.
+
+Image serialization exists in `OllamaConnector.chat_multimodal()`, but chat ingress is text/STT only. Knowledge image OCR/vision, calorie recognition, and a structured nutrition journal are not implemented; historical `nutrition_*` descriptions are not active execution paths.
 
 Historical documents may still mention those subsystems. They are not the source of truth for the current version unless a file explicitly says it is historical or target-state design only.
 

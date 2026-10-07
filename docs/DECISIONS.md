@@ -92,7 +92,9 @@
 
 ## ADR-009: speech re-enters text flow
 
-- Рішення: connector/Telegram media транскрибується і стає text input.
+- Рішення: STT-supported connector media транскрибується і стає text input.
+  Telegram media STT застосовується до allowlisted user/group sources;
+  channel sources використовують лише text/caption без media download/STT.
 - Причина: спільна memory/orchestration/delivery поведінка.
 - Альтернатива: multimodal/attachment execution engine.
 - Наслідки: потрібні `ffmpeg` і `faster-whisper`.

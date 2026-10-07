@@ -1,5 +1,76 @@
 # Lumen Change Log
 
+## 2026-10-07 — Documentation aligned with local implementation
+
+- Виправлено порядок persistence → callback delivery → post-processing та
+  опис reminder/calendar handling для транскрибованих вкладень.
+- Узгоджено огляди calendar/news, source branch/date і metadata flags, що
+  вимикають turn persistence, але не context reads чи side effects.
+- Зафіксовано межі image support: adapter serialization є, chat image ingress,
+  knowledge OCR/vision, calorie recognition і nutrition journal не реалізовані.
+- Verification: static documentation/source consistency and local Markdown
+  links; runtime code, configuration, databases and deployed artifact unchanged
+  by this documentation update. Live integrations and unit tests not run.
+
+## 2026-09-17 — Temporary news-processing timeout increase
+
+- Тимчасово збільшено загальний deadline одного `POST /news/process` job зі
+  180 до 300 секунд, щоб два послідовні structured Ollama calls встигали
+  завершитися під поточним навантаженням.
+- Зовнішній контракт `keep|skip|retry`, single-job locking та retry semantics
+  не змінені. Home Assistant REST timeout узгоджено на 310 секунд.
+- Verification: 17 focused news service/API tests passed; `Lumen.exe` rebuilt
+  and restarted; `/` and `/openapi.json` return HTTP 200. Home Assistant
+  `ha core check` and `rest_command.reload` completed successfully. Previous
+  executable: `data/backups/Lumen-before-news-timeout-20260917-084500.exe`;
+  live HA configuration backup:
+  `/homeassistant/configuration.yaml.backup-20260917-084700`.
+
+## 2026-09-08 — Stable PyInstaller extraction directory
+
+- Fix: the one-file executable no longer extracts its live `_MEI*` runtime into
+  the Windows `%TEMP%` directory, where cleanup partially removed files from a
+  still-running Lumen process and broke every new `httpx` client with
+  `FileNotFoundError` in `ssl.create_default_context()`.
+- Packaging: `compile.bat` derives `data\runtime` from its own project directory
+  and passes it through `--runtime-tmpdir`; the generated `Lumen.spec` preserves
+  the resolved build path. Home Assistant and application service code are
+  unchanged.
+- Verification: PyInstaller 6.20.0 rebuilt `dist\Lumen.exe`; the new process
+  extracted 2,618 files (275.6 MB) under `data\runtime`, exposed OpenAPI over
+  HTTP 200, read 38 Telegram messages and returned the air-alert reason through
+  inline `/api/chat` in 40.84 seconds. The previous EXE is preserved at
+  `E:\LUMEN_BACKUPS\2026-09-08-runtime-tmpdir\Lumen-before-runtime-tmpdir.exe`.
+
+## 2026-09-02 — Telegram channel media isolation
+
+- Fix: an `IndexError` from `faster-whisper`/PyAV while decoding one Telegram
+  audio/video attachment no longer aborts the complete Telegram context lookup.
+  Lumen keeps the message caption and continues reading the remaining posts.
+- Performance: channel searches now use post text/captions without downloading
+  and transcribing every audio/video attachment. Media transcription remains
+  enabled for allowlisted user and group conversations.
+- Scope: `src/lumen/services/telegram_context.py` and focused regression coverage
+  in `tests/test_telegram_context.py`; HA routing and speech attachments received
+  directly through `/connector` are unchanged.
+- Verification: 39 focused Telegram/query/chat tests passed. Rebuilt EXE exposes
+  `/connector` through `/openapi.json` HTTP 200, and its packaged
+  `lumen.services.telegram_context` matches the fixed source. Previous executable:
+  `data/backups/Lumen-before-channel-caption-fix-20260902-102140.exe`.
+
+## 2026-08-31 — Mandatory and contextual fact memory
+
+- Replaced blanket/top-three preference injection with explicit `lumen:mandatory` personal communication rules and separately budgeted semantic/lexical contextual facts for every answer mode.
+- Added fact inclusion extraction/update/revocation, scoped keyset paging, existing-schema fact vectors with content/model freshness, transactional invalidation, and observable lexical fallback.
+- Distinct communication-rule subjects and extraction identity-conflict checks prevent unrelated standing rules from overwriting each other under `current_user/prefers`.
+- Added `scripts/prepare_fact_memory.py`: read-only preview by default, explicit hash-checked policy manifest, SQLite backup, and idempotent index backfill. No embedded user IDs or production fact IDs.
+- Debug context exposes mandatory/contextual selections and index status; knowledge listings exclude internal fact vectors. New fact retrieval settings preserve contextual budgets.
+- Checkpoint before implementation: `5aed97e`. No schema migration or dependency installation.
+- Verified production preparation: six reviewed rules tagged, 37 contextual vectors indexed; repeat sync reports 37 current and zero new/failed vectors. Fact rows differ from the SQLite backup only in the six approved `tags_json` fields. Source-only greeting preview receives all six rules without unrelated contextual facts; no turn persistence or delivery.
+- Live local-model checks separate standing/task-local/contextual extraction. Multilingual calibration led to a configurable default threshold of 0.37; vector retrieval can still return extra candidates in the real corpus (tracked in TODO).
+- Verification: 92 focused unit tests passed (fact storage/context/runtime, existing chat/query/news/API/context/Telegram); syntax and diff checks passed. External integrations were disabled for API tests.
+- Approved deployment: rebuilt with `cmd /c compile.bat` and started `dist/Lumen.exe` on 2026-08-31 at 15:41. Health and `/openapi.json` respond on port 8010. Packaged `/memory/debug-search` greeting includes all six mandatory rules, no contextual facts, and answers using informal Ukrainian; no dialogue persistence or delivery. Previous executable saved as `data/backups/Lumen-before-rebuild-20260831-154034.exe`.
+
 ## 2026-08-30
 
 - Fix: відновлено виклик `MemoryService.should_enable_voice_response` у

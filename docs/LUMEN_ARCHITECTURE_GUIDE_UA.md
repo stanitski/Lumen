@@ -2,6 +2,9 @@
 
 ## Статус документа
 
+Звірено з локальним source гілки `codex/ollama-stream-watchdog` на 2026-10-07;
+deployed executable та зовнішні інтеграції під час цієї звірки не перевірялися.
+
 Це короткий актуальний гід по поточній версії Lumen. Джерело істини тут: `src/lumen/main.py`, `src/lumen/services/chat_only.py`, `src/lumen/services/reminders.py`, `src/lumen/services/memory.py`, `src/lumen/services/knowledge.py`, `src/lumen/services/delivery.py`, `src/lumen/services/speech_to_text.py`.
 
 Старі planner/skills/tasks/reminder docs не описують поточний runtime. Поточний reminder contract описує лише ізольований `ReminderService`.
@@ -17,6 +20,8 @@ Lumen це локальний FastAPI-сервіс, який:
 - зберігає turn і post-process memory;
 - доставляє фінальну відповідь через Home Assistant callback або повертає її inline.
 - записує та доставляє ізольовані reminders без planner/skills/tasks.
+- читає current-day calendar і створює події через Home Assistant;
+- обробляє Feedreader articles через окремий synchronous `/news/process`.
 
 Практично це chat-memory-knowledge core, а не automation runtime.
 
@@ -29,11 +34,16 @@ Lumen це локальний FastAPI-сервіс, який:
 3. Якщо це connector attachment з audio/video, `SpeechToTextService` робить transcript.
 4. `ChatOnlyService` збирає retrieval context через `MemoryService`.
 5. `ContextExecutor` за потреби додає temporary Telegram/web/other read-only context.
-6. `OllamaConnector` генерує фінальну відповідь.
-7. Reminder intent або structured reminder confirmation обробляється `ReminderService` до Ollama; звичайний chat продовжується без змін.
-8. Turn зберігається в SQLite.
-9. `MemoryService` робить post-processing.
-10. `DeliveryService` доставляє відповідь через Home Assistant, якщо це async path.
+6. `ReminderService` або `CalendarActionService` обробляє відповідний contract і може повернути deterministic reply до final dialogue call. Structured reminder confirmation може обійти context building взагалі; GetContract та retrieval можуть самі викликати Ollama.
+7. Для звичайного chat `OllamaConnector` генерує фінальну відповідь.
+8. Turn зберігається в SQLite, якщо user не `global` і metadata не вимикає persistence.
+9. `DeliveryService` доставляє відповідь через Home Assistant, якщо delivery увімкнено.
+10. `MemoryService` робить post-processing збереженого turn. Inline API повертає результат без callback після processing.
+
+Metadata flags `debug`, `debug_request`, `lumen_debug`, `skip_memory` і
+`disable_memory` вимикають turn persistence/post-processing, але не читання
+контексту чи reminder/calendar actions. Деталі — у
+[runtime contract](CHAT_ONLY_RUNTIME_CONTRACT_UA.md).
 
 ## 3. Основні модулі
 
@@ -43,7 +53,7 @@ Lumen це локальний FastAPI-сервіс, який:
 
 - HTTP entrypoint;
 - wiring сервісів;
-- `/chat`, `/connector`, `/knowledge/upload`, `/memory`, `/api/chat`, `/api/generate`, `/api/tags`, `/api/show`.
+- `/chat`, `/connector`, `/knowledge/upload`, `/news/process`, `/memory`, `/api/chat`, `/api/generate`, `/api/tags`, `/api/show`.
 
 Коли дивитися сюди:
 
@@ -111,7 +121,7 @@ state та contract-requested knowledge handlers повертають
 
 - bounded read-only Telegram lookup;
 - доступ лише через дозволені `messenger_context` facts;
-- optional STT reuse для Telegram audio/video.
+- STT reuse для allowlisted user/group audio/video; channel sources читаються лише як text/caption без media download/STT.
 
 Коли дивитися сюди:
 
@@ -245,3 +255,27 @@ state та contract-requested knowledge handlers повертають
 ## 7. Reminders
 
 `ReminderService` зберігає one-time, daily та weekly occurrence у власній SQLite схемі. Він створює одну Windows wake task на найближчий due або confirmation deadline, доставляє reminder через Home Assistant та приймає лише корельоване підтвердження `reminder_confirmed:<id>:<delivery_id>`. Старий callback без `delivery_id` відхиляється, бо не може безпечно завершити occurrence.
+
+Calendar projections read-only у локальному reminder lifecycle. Management,
+grace/missed, anchored retry та explicit snooze описані в
+[runtime contract](CHAT_ONLY_RUNTIME_CONTRACT_UA.md).
+
+## 8. Calendar і news
+
+`CalendarActionService` робить один HA calendar create call у configured entity;
+невизначений результат не повторюється автоматично. `HomeAssistantCalendarClient`
+читає поточний Kyiv day і проєктує events у reminders; WebSocket сигнал запускає
+authoritative REST reread.
+
+`NewsProcessingService` через shared `WebPageExtractor` отримує article або RSS
+fallback, застосовує editorial/user-dislike filter і формує українську 5W
+озвучку. `/news/process` повертає `keep|skip|retry`, допускає один in-flight job
+і не проходить через `ChatOnlyService` чи callback delivery.
+
+## 9. Фото та журнал харчування
+
+`OllamaConnector.chat_multimodal()` може передавати зображення, але chat ingress
+не використовує image parts: `/connector` приймає лише STT-supported media,
+а `/api/chat` дістає текст. Knowledge image OCR/vision не реалізовано.
+Активного calorie recognition або structured nutrition journal немає;
+старі `nutrition_*` описи не мають runtime executor.

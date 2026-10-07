@@ -12,8 +12,10 @@ Current Lumen is a chat-memory-knowledge core. It supports:
 - knowledge retrieval as read-only prompt context;
 - bounded external context through `ContextExecutor`;
 - callback delivery through Home Assistant.
+- isolated reminder lifecycle and calendar read/create through Home Assistant;
+- synchronous Feedreader article processing through `/news/process`.
 
-Current Lumen does not run planner, skills, tasks, or smart-home control. It has one isolated reminder integration with its own SQLite state, one Windows wake task, and Home Assistant delivery confirmation.
+Current Lumen does not run planner, skills, tasks, or smart-home control. Reminders have their own SQLite state, one Windows wake task, and Home Assistant delivery confirmation. Calendar and news use separate services.
 
 ## Architecture
 
@@ -39,11 +41,11 @@ Current Lumen does not run planner, skills, tasks, or smart-home control. It has
 3. Audio/video attachments are transcribed, then re-enter the normal text chat path.
 4. `ChatOnlyService` resolves the effective `user_id`.
 5. `MemoryService.build_planner_context(...)` retrieves relevant facts, dialogue evidence, knowledge evidence, and a query contract.
-6. `ContextExecutor` optionally fetches temporary external context for `telegram/search`, `web/search`, `home_assistant/read_state`, or `knowledge/search`.
+6. `ContextExecutor` optionally fetches temporary Telegram/web context; Home Assistant state and contract-requested knowledge handlers remain pending. Reminder/calendar contracts can return a deterministic response before the final dialogue call; structured reminder confirmation can bypass context building.
 7. Ollama generates the final answer from the assembled prompt.
 8. The turn is persisted in SQLite.
-9. Post-processing extracts stable facts and refreshes dialogue metadata and embeddings.
-10. `DeliveryService` sends the callback response through Home Assistant, while Ollama-compatible routes return inline.
+9. `DeliveryService` sends the callback response through Home Assistant when delivery is enabled.
+10. Post-processing extracts stable facts and refreshes dialogue metadata and embeddings for the stored turn. Ollama-compatible routes return inline after this step, without callback delivery.
 
 ## Connector and speech behavior
 
@@ -52,7 +54,9 @@ Current Lumen does not run planner, skills, tasks, or smart-home control. It has
 - `event_type="text"` with plain text;
 - `event_type="attachment"` only when the attachment is recognized as speech/video for STT.
 
-Unsupported connector events are ignored with an explicit reason. Speech attachments are not routed through planner, task, or reminder flows.
+Unsupported connector events are ignored with an explicit reason. Transcribed speech enters the same text flow, including reminder/calendar contract handling.
+
+Photo recognition and nutrition logging are not active features. `OllamaConnector.chat_multimodal()` can serialize images, but chat ingress does not pass images to it. `/connector` rejects non-STT attachments; `/api/chat` extracts text only. Knowledge image uploads have no OCR/vision extraction. Historical `nutrition_*` JSON descriptions do not have an active executor or a structured meal journal.
 
 ## External context contract
 
@@ -110,11 +114,14 @@ Main persistence tables:
 - `memory_facts`
 - `memory_embeddings`
 - `knowledge_upload_sessions`
+- `reminders`
+- `reminder_management_sessions`
 - `schema_version`
 
 Current runtime behavior:
 
 - turns are stored for non-`global` users;
+- metadata flags `debug`, `debug_request`, `lumen_debug`, `skip_memory`, or `disable_memory` suppress turn persistence and its post-processing, while context retrieval remains active; see the [runtime contract](docs/CHAT_ONLY_RUNTIME_CONTRACT_UA.md);
 - profile facts are extracted after persistence;
 - dialogue retrieval uses bounded semantic and lexical evidence;
 - knowledge is retrieval context, not a second chat engine;

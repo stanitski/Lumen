@@ -2,7 +2,7 @@
 
 ## Статус і джерела
 
-Документ описує live wiring гілки `codex/calendar-reminders` на 2026-08-04.
+Документ звірено з локальним кодом гілки `codex/ollama-stream-watchdog` на 2026-10-07; стан deployed executable цим не підтверджено.
 Ключові джерела: `src/lumen/main.py`, `src/lumen/services/chat_only.py`,
 `src/lumen/services/memory.py`, `src/lumen/services/reminders.py`,
 `src/lumen/storage/db.py`.
@@ -14,6 +14,9 @@ flowchart LR
     I["FastAPI ingress<br/>main.py"] --> C["ChatOnlyService"]
     C --> M["MemoryService"]
     M --> S["MemoryStore"]
+    M --> FC["FactContextService"]
+    FC --> S
+    FC --> O
     S --> DB[("SQLite schema v34")]
     M --> O["OllamaConnector"]
     C --> X["ContextExecutor"]
@@ -89,9 +92,9 @@ structured Ollama call відкидає лише technical/editorial junk і з�
 article з exact user `news_context/topic:*` `dislikes`; другий call для `keep`
 готує 2–4 українські 5W-речення. Результат `keep|skip|retry` містить stable Todo
 key від SHA-256 canonical URL. Недоступний article разом із недостатнім RSS
-контекстом є terminal `skip` (`insufficient_source_context`), тоді як timeout,
-модельні та transport failures лишаються `retry`. Один in-flight job має 180-second deadline;
-конкурентний запит отримує `429` і `Retry-After: 60`.
+ контекстом є terminal `skip` (`insufficient_source_context`), тоді як timeout,
+ модельні та transport failures лишаються `retry`. Один in-flight job тимчасово має 300-second deadline;
+ конкурентний запит отримує `429` і `Retry-After: 60`.
 
 ## Telegram → відповідь
 
@@ -156,6 +159,15 @@ recovery застосовує звичайну grace policy.
 - `MemoryService.build_planner_context()` паралельно читає semantic,
   topic/lexical dialogue candidates і knowledge candidates;
 - `postprocess_dialogue_turn()` добуває facts і заповнює embeddings/metadata.
+
+Для facts `MemoryService` делегує `FactContextService`: `lumen:mandatory`
+позначає всі безумовні персональні правила в окремому prompt-блоці; решта
+добирається семантично та лексично незалежно від answer mode. Контекстні
+fact vectors мають `source_type=memory_fact` і hash/model metadata в чинній
+`memory_embeddings`; stale/expired/orphaned vectors не використовуються.
+Store інвалідує індекс під час запису/видалення, post-processing відновлює
+актуальні vectors. Окрема operator procedure робить початковий backfill.
+Повний контракт і бюджети: `docs/CHAT_ONLY_RUNTIME_CONTRACT_UA.md`.
 
 SQLite vector similarity виконується in-process у `MemoryStore`, а не через
 окрему vector DB.

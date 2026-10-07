@@ -2,6 +2,9 @@
 
 ## 1. Паспорт проєкту
 
+Документ звірено з локальним source гілки `codex/ollama-stream-watchdog` на
+2026-10-07; ця звірка не підтверджує deployed executable чи external health.
+
 Lumen — локальний персональний AI-асистент із FastAPI API, Ollama та
 SQLite-backed пам’яттю. Він приймає текстові запити, транскрибує підтримувані
 audio/video attachments, добирає релевантні facts, dialogue та knowledge,
@@ -16,7 +19,8 @@ Telethon, `faster-whisper` і `pypdf`.
 запускається через Uvicorn. `compile.bat` збирає one-file `Lumen.exe`.
 
 Поточний статус: active chat-memory-knowledge core із двома вузькими
-side-effect integrations — reminders і calendar. Поточна schema:
+side-effect integrations — reminders і calendar, та окремим synchronous news
+processing. Поточна schema:
 `CURRENT_SCHEMA_VERSION = 34`. Зовнішні live integrations після rebuild/restart
 ще потребують ручної перевірки.
 
@@ -137,6 +141,12 @@ Home Assistant виконує три окремі ролі:
 
 Generic Home Assistant entity-state read і device control не реалізовані.
 
+Chat ingress підтримує text/STT, без передачі фото до Ollama. Adapter
+`chat_multimodal()` серіалізує images, але knowledge OCR/vision, розпізнавання
+калорій і структурований nutrition journal не реалізовані. Межі image support
+та memory-suppression metadata flags описані в
+`docs/CHAT_ONLY_RUNTIME_CONTRACT_UA.md`.
+
 ## 5. Карта ключових файлів
 
 | Шлях | Призначення | Ключові символи |
@@ -168,6 +178,10 @@ Generic Home Assistant entity-state read і device control не реалізов
 - LLM provider: лише `OllamaConnector`.
 - Memory/RAG: `MemoryService` + `MemoryStore`; deterministic retrieval policy,
   facts, semantic/lexical dialogue candidates, knowledge embeddings.
+- Fact context: `FactContextService` + `memory/fact_policy.py`; усі персональні
+  `lumen:mandatory` rules без contextual budgets, решта facts — semantic/lexical
+  retrieval із hash/model validation і lexical fallback. `include_facts` тепер
+  не вимикається за answer mode. Схема не змінюється.
 - Integrations: `TelegramContextService`, `WebPageExtractor`,
   `DuckDuckGoWebSearch`, `NewsProcessingService`,
   `DeliveryService`, `HomeAssistantCalendarClient`,

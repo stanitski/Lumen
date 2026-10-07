@@ -1,6 +1,6 @@
 # Ключові модулі
 
-Статус: live-код гілки `codex/calendar-reminders`, 2026-08-04.
+Статус: звірено з локальним кодом гілки `codex/ollama-stream-watchdog`, 2026-10-07; без перевірки deployed executable.
 
 | Модуль | Призначення і ключові символи | Хто викликає / що викликає | Стан |
 |---|---|---|---|
@@ -8,6 +8,8 @@
 | `services/chat_only.py` | `ChatOnlyService`, prompt assembly, routing reminder/calendar, persistence/delivery | endpoints → service → memory/context/Ollama/reminder/calendar/delivery | центральний активний orchestrator |
 | `services/memory.py` | `MemoryService`, `GetContract`, retrieval policy, facts, dialogue/knowledge retrieval, news topic dislikes | chat/knowledge/news → store/Ollama | активний, великий і частково має legacy naming (`build_planner_context`) |
 | `memory/store.py` | SQLite queries та in-process cosine search | memory/knowledge/Telegram services | активна частина змішана з legacy intents/skills/tasks API |
+| `services/fact_context.py` | mandatory/contextual fact retrieval, freshness і indexing | `MemoryService` → `MemoryStore`/Ollama; operator backfill | окремий активний fact-context service |
+| `memory/fact_policy.py` | reserved marker, canonical hash і prompt eligibility | store/fact context/extraction | спільний контракт без schema change |
 | `storage/db.py` | `Database`, schema `v34`, reminder migrations і `reminder_management_sessions` | `main.py`, wake entrypoint, tests | активний; schema source of truth |
 | `connectors/ollama.py` | `OllamaConnector.chat()`, `.embed()`, `.healthcheck()` | memory/chat/knowledge | єдиний live LLM provider |
 | `services/context_executor.py` | `ContextExecutor.execute()` і prompt formatting | `ChatOnlyService` → Telegram/web adapters | Telegram/web активні; HA/knowledge handlers pending |
