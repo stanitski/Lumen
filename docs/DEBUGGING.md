@@ -34,8 +34,10 @@ Build:
 cmd /c compile.bat
 ```
 
-`run.bat` містить PowerShell assignment syntax; не вважати його підтвердженим
-batch launcher до окремої live перевірки.
+`run.bat` є Windows batch launcher від власного каталогу: використовує локальний
+`.venv\Scripts\python.exe`, якщо він є, інакше `python` із PATH. Запускає
+`python -m lumen.main`; host/port читаються з `Settings`. Source smoke:
+`cmd /c run.bat --timezone-smoke` (тільки з isolated DB/log environment для тесту).
 
 ## Логи й конфігурація
 
@@ -76,6 +78,9 @@ DB/log paths та `.env`.
 
 ## Memory/RAG
 
+Локальна адмінка `/memory`: факти, редагування/видалення, пошук і тестова
+відповідь із точним знімком переданого контексту. Див. [MEMORY_ADMIN.md](MEMORY_ADMIN.md).
+
 Без запису нового turn:
 
 ```powershell
@@ -87,13 +92,91 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8010/memory/debug-search -C
 `context_execution` і final message count. `/memory/delete` змінює дані —
 використовувати тільки з явним погодженням.
 
+## Підготовка й перевірка fact memory
+
+`scripts/prepare_fact_memory.py` не імпортує `lumen.main`, не виконує schema
+init, не створює діалогів і не викликає delivery. Без `--apply` це read-only
+preview; `--index` сам по собі не запускає Ollama чи записи.
+
+Для ручного позначення підготувати приватний JSON manifest — масив об’єктів
+із `id`, `expected_hash` (через `fact_content_hash()` від перевіреного запису)
+та `inclusion` (`mandatory` або `contextual`). Переглянути зміст і джерело
+кожного факту; не переносити task-local instructions у standing rules.
+Manifest і backups зберігати поза Git, наприклад у `data/debug/` і `data/backups/`.
+
+```powershell
+$env:PYTHONPATH='src'
+python scripts/prepare_fact_memory.py --user-id VST --manifest data/debug/fact-memory-mandatory-manifest.json --index
+python scripts/prepare_fact_memory.py --user-id VST --manifest data/debug/fact-memory-mandatory-manifest.json --index --apply
+```
+
+Apply спершу робить консистентний SQLite backup, потім перевіряє всі owner/hash
+у транзакції та змінює лише policy tags. Backfill можна повторити без manifest:
+`python scripts/prepare_fact_memory.py --user-id VST --index --apply`.
+Він пропускає актуальні hash/model, індексує missing/stale contextual facts,
+повертає counters і завершується з ненульовим кодом за failed embeddings.
+Для global facts запускати окремо з `--user-id global`; персональні правила
+на global scope не позначати.
+
+Під час debug перевіряти `mandatory_facts`, `contextual_facts`, `selected_facts`
+і `fact_retrieval`: `missing_indexes`, `stale_indexes`, `fallback`, `status`.
+Для «Привіт» усі standing rules мають бути в `mandatory_context`, а не лише
+перші три. Зміна embedding model потребує backfill; до нього працює lexical
+fallback. Налаштування порога `FACT_SEMANTIC_MIN_SIMILARITY=0.37` перевірено на
+невеликому різномовному наборі; це не гарантія релевантності для всіх тем.
+
+Відкат коду та БД — різні операції. Checkpoint перед цією зміною: `5aed97e`.
+Не замінювати всю production БД старим backup після появи нових діалогів чи
+reminders: повертати лише перевірені policy tags та службовий fact index.
+Rebuild/restart executable виконується окремо.
+
+API-тести із startup повинні також вимикати external integrations через
+environment: порожні `HOME_ASSISTANT_TOKEN`, `HOME_ASSISTANT_CALENDAR_ENTITY_IDS`
+і `HOME_ASSISTANT_URL`, окремі `LUMEN_DB_PATH` та `LOG_FILE_PATH`. Однієї
+тимчасової БД недостатньо, щоб запобігти calendar reads із локального `.env`.
+`tests/runtime_test_support.py` задає тимчасові DB/log/session paths і вимикає
+HA/Telegram перед імпортом `lumen.main`; API-тести імпортують `main` через нього.
+Для нових API-тестів використовувати цей helper, а не прямий import entrypoint.
+
+## Packaged `_MEI` runtime
+
+Якщо процес і порт `8010` живі, але Ollama, Telegram, HA callback та calendar
+одночасно падають із `FileNotFoundError: [Errno 2] No such file or directory`
+через `ssl.create_default_context()`, перевірити extraction-каталог процесу.
+Частково очищений `%TEMP%\_MEI*` може залишити EXE доступним, але непридатним
+для нових HTTP-з’єднань.
+
+Поточна збірка має створювати `_MEI*` під `data\runtime`, а не в `%TEMP%`.
+Контрольована процедура відновлення: завершити обидва процеси `Lumen.exe`,
+перебудувати через `cmd /c compile.bat`, запустити `dist\Lumen.exe`, перевірити
+`/openapi.json`, розташування нового `_MEI*` і один inline `/api/chat` без
+delivery. Не видаляти extraction-каталог живого процесу.
+
 ## Telegram
+
+STT: порожнє `STT_LANGUAGE=` вмикає автовизначення мови кожного audio/video
+attachment; `STT_LANGUAGE=uk` примусово задає українську. Після зміни потрібен
+restart Lumen, rebuild не потрібен. Якість перемикань мов усередині одного
+запису перевіряти окремо на оригінальному аудіо.
 
 1. `MemoryStore.list_facts()` має повернути explicit source fact.
 2. `TelegramContextService._select_sources()` має дотримати `kind`.
 3. Credentials і session мають бути configured.
 4. Explicit date range обмежується 500 scanned messages/source.
 5. Telegram context не повинен записувати fetched messages у memory.
+
+Для channel source поточний runtime читає текст/caption і не запускає STT для
+вкладених audio/video. Повторювані `ffmpeg was not found` або
+`Telegram media transcription ...` під час саме channel lookup означають, що
+запущений застарілий executable: звірити packaged
+`lumen.services.telegram_context` із source, перебудувати EXE і перезапустити
+процес. Для user/group source STT залишається очікуваною поведінкою.
+
+Пошкоджене media може дати warning, але не повинно завершувати весь запит через
+`Chat-only dialogue failed`: Lumen має зберегти caption і продовжити пошук.
+Нормальна послідовність для асинхронного `/connector`: HTTP acceptance, згодом
+`Read N Telegram message(s)`, Ollama request і callback у Home Assistant. Сам
+успішний acceptance ще не підтверджує завершення обробки або delivery.
 
 Login helper:
 

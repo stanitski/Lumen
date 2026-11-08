@@ -3,9 +3,12 @@
 import sys
 from datetime import time
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from lumen.timezones import kyiv_timezone
 
 
 def _project_root() -> Path:
@@ -15,13 +18,14 @@ def _project_root() -> Path:
 
 
 PROJECT_ROOT = _project_root()
+DEFAULT_LUMEN_USER_ID = "VST"
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=PROJECT_ROOT / ".env", env_file_encoding="utf-8", extra="ignore")
 
     lumen_env: str = "development"
-    lumen_user_id: str = "VST"
+    lumen_user_id: str = DEFAULT_LUMEN_USER_ID
     log_level: str = "DEBUG" #DEBUG INFO WARNING ERROR CRITICAL
     log_file_path: str = "./data/debug/lumen.log"
     lumen_host: str = "0.0.0.0"
@@ -38,6 +42,11 @@ class Settings(BaseSettings):
     ollama_debug_dump_path: str = "./data/debug/last_ollama_request.json"
     ollama_compat_user_id: str = ""
     dialogue_memory_window_hours: int = 3
+    conversation_recent_turn_limit: int = Field(default=8, ge=1, le=50)
+    conversation_context_char_limit: int = Field(default=6000, ge=256)
+    fact_semantic_min_similarity: float = Field(default=0.37, ge=0.0, le=1.0)
+    fact_context_item_limit: int = Field(default=10, ge=1)
+    fact_context_char_limit: int = Field(default=2400, ge=1)
 
     home_assistant_url: str = "http://homeassistant.local:8123"
     home_assistant_token: str = ""
@@ -64,8 +73,32 @@ class Settings(BaseSettings):
     reminder_grace_minutes: int = 30
     reminder_snooze_minutes: int = 15
     reminder_management_session_ttl_minutes: int = 10
+    nutrition_enabled: bool = True
+    nutrition_directory: str = "./data/nutrition"
+    nutrition_model: str = ""
+    nutrition_timezone: str = "Europe/Kyiv"
+    nutrition_image_max_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
+    nutrition_image_timeout_seconds: float = Field(default=30, gt=0)
 
-    @field_validator("log_file_path", "lumen_db_path", "ollama_debug_dump_path", "telegram_session_path", mode="after")
+    @field_validator("nutrition_timezone")
+    @classmethod
+    def _validate_nutrition_timezone(cls, value: str) -> str:
+        value = value.strip()
+        if value in {"Europe/Kyiv", "Europe/Kiev"}:
+            kyiv_timezone()
+            return "Europe/Kyiv"
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("NUTRITION_TIMEZONE must be an available IANA timezone") from exc
+        return value
+
+    @field_validator("lumen_user_id")
+    @classmethod
+    def _normalize_lumen_user_id(cls, value: str) -> str:
+        return value.strip() or DEFAULT_LUMEN_USER_ID
+
+    @field_validator("log_file_path", "lumen_db_path", "ollama_debug_dump_path", "telegram_session_path", "nutrition_directory", mode="after")
     @classmethod
     def _resolve_project_path(cls, value: str) -> str:
         path = Path(value)

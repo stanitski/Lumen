@@ -38,21 +38,16 @@
 
 ## 4. Legacy cleanup
 
-Окремим reviewed change:
-
-- inventory callers `SkillRecord`/`IntentRecord`/execution/task models;
-- inventory legacy `MemoryStore` methods;
-- вирішити долю `intents.json`/`system_skills.json`;
-- прибрати або ізолювати лише підтверджено невикористане;
-- оновити imports/tests/docs.
-
-Залежність: owner approval щодо backward compatibility та scripts/data.
+Локально завершено 2026-10-07: невикористані planner/task models, store methods
+і JSON seeds видалено після caller audit. Schema/migrations та timezone bundle
+збережено. Залишається перевірити наступний deployed artifact і окремо оцінити
+compatibility names/retention labels у `memory.py`.
 
 ## 5. Maintainability
 
 - вирішити naming `build_planner_context`;
 - розглянути service factory/lifespan замість module-level initialization;
-- виправити або замінити `run.bat`;
+- перевірити переносний `run.bat` у наступному deployment workflow;
 - додати explicit deployment/version diagnostic;
 - визначити SQLite growth/retention benchmark.
 
@@ -62,7 +57,7 @@
 - Canonical deployment command/artifact?
 - Чи потрібні generic HA actions або лише вузькі integrations?
 - Чи потрібен explicit knowledge context source?
-- Коли legacy cleanup дозволений?
+- Чи потрібне подальше спрощення compatibility naming?
 - Які volume/SLA/retention очікуються?
 
 ## Не підтверджено

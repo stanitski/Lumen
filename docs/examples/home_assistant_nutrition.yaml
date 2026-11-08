@@ -1,0 +1,60 @@
+# HA package: helper scripts only. Does not add a second Telegram ingress or
+# webhook. Wire the existing automations as described in ../NUTRITION.md.
+# Uses the existing rest_command.lumen_connector and its configured URL.
+script:
+  lumen_connector_nutrition:
+    alias: Lumen connector with nutrition metadata
+    mode: parallel
+    fields:
+      connector:
+        required: true
+        description: Existing rest_command.lumen_connector service data
+      telegram_event:
+        required: true
+        description: Normalized Telegram ID, reply, caption and date captured before any wake delay
+      received_at:
+        required: true
+        description: Original trigger.event.time_fired ISO timestamp
+    sequence:
+      - action: rest_command.lumen_connector
+        data:
+          source: "{{ connector.get('source', 'telegram') }}"
+          event_type: "{{ connector.get('event_type', 'text') }}"
+          user_id: "{{ connector.user_id }}"
+          reply_to: "{{ connector.reply_to }}"
+          text: "{{ connector.get('text') or telegram_event.get('text') or telegram_event.get('caption') or '' }}"
+          command: "{{ connector.get('command', '') }}"
+          args: "{{ connector.get('args', '') }}"
+          file_id: "{{ connector.get('file_id', '') }}"
+          file_name: "{{ connector.get('file_name', '') }}"
+          file_mime_type: "{{ connector.get('file_mime_type', '') }}"
+          file_size: "{{ connector.get('file_size') }}"
+          file_url: "{{ connector.get('file_url') }}"
+          event_data: >-
+            {{ dict(connector.get('event_data', {}),
+              message_id=telegram_event.get('id'),
+              reply_to_message_id=telegram_event.get('reply_to_message_id'),
+              sent_at=(telegram_event.get('date') if telegram_event.get('date') is number
+                       else (telegram_event.get('date') or received_at) | string)) }}
+
+  lumen_nutrition_reply:
+    alias: Lumen nutrition Telegram response
+    mode: queued
+    fields:
+      lumen:
+        required: true
+        description: The existing callback payload (trigger.json)
+    sequence:
+      - variables:
+          reply_data: >-
+            {%- set data = dict(message=lumen.answer, chat_id=lumen.metadata.target_chat_id,
+                               parse_mode='plain_text') -%}
+            {%- if lumen.metadata.get('reply_to_message_id') -%}
+              {%- set data = dict(data, reply_to_message_id=lumen.metadata.reply_to_message_id) -%}
+            {%- endif -%}
+            {%- if lumen.metadata.get('message_tag') -%}
+              {%- set data = dict(data, message_tag=lumen.metadata.message_tag) -%}
+            {%- endif -%}
+            {{ data }}
+      - action: telegram_bot.send_message
+        data: "{{ reply_data }}"

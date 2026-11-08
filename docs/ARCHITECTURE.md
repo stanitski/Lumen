@@ -2,7 +2,7 @@
 
 ## Статус і джерела
 
-Документ звірено з локальним кодом гілки `codex/ollama-stream-watchdog` на 2026-10-07; стан deployed executable цим не підтверджено.
+Документ звірено з локальним source 2026-10-18; стан deployed executable цим не підтверджено.
 Ключові джерела: `src/lumen/main.py`, `src/lumen/services/chat_only.py`,
 `src/lumen/services/memory.py`, `src/lumen/services/reminders.py`,
 `src/lumen/storage/db.py`.
@@ -13,6 +13,9 @@
 flowchart LR
     I["FastAPI ingress<br/>main.py"] --> C["ChatOnlyService"]
     C --> M["MemoryService"]
+    C --> CV["ConversationService"]
+    CV --> M
+    CV --> D["DeliveryService"]
     M --> S["MemoryStore"]
     M --> FC["FactContextService"]
     FC --> S
@@ -22,29 +25,35 @@ flowchart LR
     C --> X["ContextExecutor"]
     X --> T["TelegramContextService"]
     X --> W["DuckDuckGoWebSearch"]
+    X --> NS
     W --> E["WebPageExtractor"]
     I --> N["NewsProcessingService"]
+    I --> NJ["NutritionService"]
+    NJ --> O
+    NJ --> NS["NutritionStore<br/>JSON + CSV"]
+    NJ --> CV
     N --> E
     N --> M
     N --> O
     C --> R["ReminderService"]
     C --> A["CalendarActionService"]
-    C --> D["DeliveryService"]
     A --> HA["Home Assistant"]
     D --> HA
     HC["HomeAssistantCalendarClient"] --> HA
     HC --> R
     R --> D
+    R --> CV
     R --> WT["WindowsWakeAdapter"]
 ```
 
-Стрілки відповідають constructor wiring та викликам у `main.py` і
-`ChatOnlyService`.
+Стрілки відповідають constructor wiring та викликам у `main.py`,
+`ChatOnlyService` і спільному `ConversationService`.
 
 ## Точки входу та запуск
 
 - `python src/lumen/main.py` або Uvicorn запускає `app` з `main.py`;
-- `run.bat` запускає `uvicorn lumen.main:app --app-dir src`;
+- `run.bat` запускає `python -m lumen.main` із кореня checkout, використовує
+  локальний `.venv`, якщо він є, та host/port із `Settings`;
 - `compile.bat` збирає one-file `Lumen.exe`;
 - `python -m lumen.reminder_wakeup [db_path]` є entrypoint Windows wake task;
 - startup handler запускає `ReminderService.run_due()` і, за наявності
@@ -52,8 +61,8 @@ flowchart LR
 
 HTTP endpoints визначені тільки у `src/lumen/main.py`.
 
-`POST /news/process` є окремим synchronous ingress і не проходить через
-`ChatOnlyService` чи callback delivery.
+`POST /news/process` є окремим synchronous Feedreader API, не звичайним
+діалогом і не фоновою обробкою всіх новин.
 
 ## Runtime: звичайний chat
 
@@ -62,26 +71,40 @@ sequenceDiagram
     participant U as Ingress
     participant C as ChatOnlyService
     participant M as MemoryService
+    participant V as ConversationService
     participant X as ContextExecutor
     participant O as Ollama
     participant DB as SQLite
     participant D as DeliveryService
     U->>C: ChatRequest
-    C->>M: build_planner_context()
+    C->>M: bounded chronological context + build_planner_context()
     M->>O: GetContract + embeddings
     M->>DB: facts/turns/knowledge reads
     C->>X: execute(context_sources)
     X-->>C: bounded temporary context
     C->>O: final dialogue call
     O-->>C: answer
-    C->>DB: add_turn()
-    C->>D: callback when deliver=True
-    C->>M: postprocess_dialogue_turn()
+    C->>V: finish(user-facing result)
+    V->>M: persist turn
+    V->>D: callback when deliver=True
+    V->>M: postprocess_dialogue_turn()
 ```
 
 `/chat` і `/connector` повертають `202` та виконують flow через
 `asyncio.create_task()`. `/api/chat` і `/api/generate` чекають той самий
 semantic result inline та не викликають callback.
+
+`_start_background_task()` утримує references до chat/connector, reminder
+recovery і calendar tasks, логуючи unexpected failures. Shutdown скасовує та
+очікує незавершені задачі; це не durable queue і не гарантія delivery після
+зупинки процесу.
+
+Knowledge upload спершу добуває текст і перевіряє весь embedding batch, потім
+`MemoryStore.replace_embeddings()` замінює лише відповідний user/type/ref у
+одній SQLite transaction. Помилка до commit залишає попередній індекс цілим.
+Extraction і atomic DB write виконуються через `asyncio.to_thread()`. Завершення
+upload (success/error) записується в shared conversation history як короткий
+user-facing результат; ім'я файлу, його вміст і transport details не додаються.
 
 ## Runtime: Feedreader news
 
@@ -91,7 +114,11 @@ semantic result inline та не викликають callback.
 structured Ollama call відкидає лише technical/editorial junk і зіставляє
 article з exact user `news_context/topic:*` `dislikes`; другий call для `keep`
 готує 2–4 українські 5W-речення. Результат `keep|skip|retry` містить stable Todo
-key від SHA-256 canonical URL. Недоступний article разом із недостатнім RSS
+key від SHA-256 canonical URL. Це request-driven Feedreader API, а не фонове
+опрацювання всіх dialogue turns чи native dialogue path. Його внутрішні
+classifiers, article fetches і Todo plumbing не додаються до conversation
+context; звичайна відповідь на окреме питання користувача про новини йде через
+звичайний chat. Недоступний article разом із недостатнім RSS
  контекстом є terminal `skip` (`insufficient_source_context`), тоді як timeout,
  модельні та transport failures лишаються `retry`. Один in-flight job тимчасово має 300-second deadline;
  конкурентний запит отримує `429` і `Retry-After: 60`.
@@ -100,12 +127,30 @@ key від SHA-256 canonical URL. Недоступний article разом із
 
 У репозиторії немає Telegram bot ingress. Telegram надходить через generic
 `/connector` payload, який формує callback metadata у `_callback_metadata()`.
-Text event передається до `ChatOnlyService`; attachment спершу проходить
-`SpeechToTextService`.
+Telegram food photos і текстові виправлення обробляє `NutritionService`
+до звичайного chat. Інший текст передається до `ChatOnlyService`;
+audio/video attachment проходить `SpeechToTextService`.
+
+Nutrition використовує structured vision/text analysis через наявний Ollama
+adapter, per-user lock та `NutritionStore`: authoritative JSON записується
+атомарно перед відновлюваною four-column CSV projection. User-facing nutrition
+responses проходять через `ConversationService`; receipts і callback correlation
+лишаться технічними metadata, не окремими utterances. Nutrition summary у
+звичайному chat читає authoritative JSON через `ContextExecutor`.
+Receipts забезпечують
+dedup за user/chat/message. Окрему HA sent-correlation automation видалено
+2026-10-18; нові прив’язки ID підтвердження бота не надходять. Nutrition values лишаються в окремому
+JSON/CSV store; user-facing response history використовує наявну SQLite
+`conversation_turns` без schema migration.
+Контракти, settings і локальний HA helper: `NUTRITION.md`. Multi-worker writes
+не підтримуються; packaged shared-history deployment виконано 2026-10-18, див. `HANDOVER.md`.
 
 Окремий `TelegramContextService` — це read-only MTProto lookup для контексту,
-не ingress і не сховище повідомлень. Він читає тільки джерела, allowlisted у
-`memory_facts` як `messenger_context`.
+не ingress і не сховище повідомлень. Канали й групи читаються зі списку
+`memory_facts` / `messenger_context`. Прямо вказаний користувач (`@username`
+у поточному запиті) дозволяє разове читання особистої переписки без запису
+до списку. Ref лише з model query такого дозволу не дає; перед читанням
+Telethon entity має бути `User`.
 
 ## Home Assistant → дія або відповідь
 
@@ -116,7 +161,9 @@ Text event передається до `ChatOnlyService`; attachment сперш�
 - calendar read/projection: `HomeAssistantCalendarClient.snapshot_today()` та
   WebSocket `calendar/event/subscribe` → authoritative REST reread →
   `_project_calendar_events()` → `ReminderService.upsert_calendar_reminder()`;
-- generic `home_assistant/read_state` у `ContextExecutor` ще не реалізований;
+- `nutrition/summary` у `ContextExecutor` читає authoritative JSON напряму;
+- generic `home_assistant/read_state` і contract-requested `knowledge/search`
+  у `ContextExecutor` ще не реалізовані;
 - smart-home device control відсутній.
 
 ## Reminder flow
@@ -143,6 +190,10 @@ canonical slot. Silence/`no` також завершує occurrence як про�
 немає. Тільки explicit `snooze` створює один child (default 15 хв), який не може
 перетнути наступний recurring slot. Transport retry пише `next_attempt_at`, не
 змінюючи root `due_at`, і припиняється по завершенні grace window.
+Після успішної доставки текст нагадування додається в chronological history як
+assistant-only `reminder_notification` із порожнім питанням. `delivery_id`
+забезпечує ідемпотентність; збій запису історії не запускає повторну доставку,
+а повторюється з `awaiting_confirmation` під час наступного циклу.
 
 `WindowsWakeAdapter` підтримує одну найближчу Task Scheduler задачу з
 `WakeToRun`, `StartWhenAvailable`, `AllowStartIfOnBatteries` та
@@ -172,6 +223,9 @@ Store інвалідує індекс під час запису/видален�
 SQLite vector similarity виконується in-process у `MemoryStore`, а не через
 окрему vector DB.
 
+Fact-context build використовує ID maps і один lexical score на факт, щоб не
+перебирати весь список для кожного index/hit; ranking і budgets збережено.
+
 ## LLM
 
 Є один provider adapter: `OllamaConnector`. Він викликає Ollama `/api/chat`,
@@ -189,7 +243,7 @@ SQLite vector similarity виконується in-process у `MemoryStore`, а 
 ## Конфігурація
 
 `Settings` у `src/lumen/config.py` читає `.env` від `PROJECT_ROOT`. Відносні
-DB/log/debug/Telegram-session шляхи резолвляться від project root, включно з
+DB/log/debug/Telegram-session/nutrition-directory шляхи резолвляться від project root, включно з
 PyInstaller mode. Публічний шаблон — `.env.example`.
 
 Calendar read і write вмикаються окремо. Read projection потребує token,
@@ -198,6 +252,9 @@ token і `HOME_ASSISTANT_CALENDAR_WRITE_ENTITY_ID`.
 Reminder lifecycle settings: `REMINDER_GRACE_MINUTES` (default `30`),
 `REMINDER_SNOOZE_MINUTES` (default `15`) і
 `REMINDER_MANAGEMENT_SESSION_TTL_MINUTES` (default `10`).
+Conversation context uses `DIALOGUE_MEMORY_WINDOW_HOURS` (default `3`),
+`CONVERSATION_RECENT_TURN_LIMIT` (default `8`) and
+`CONVERSATION_CONTEXT_CHAR_LIMIT` (default `6000`).
 
 ## Зовнішні залежності
 

@@ -47,8 +47,6 @@ class TelegramContextService:
 
     async def search(self, request: dict[str, object], *, user_id: str, user_text: str) -> TelegramLookupResult:
         allowed_sources = self._allowed_sources(user_id)
-        if not allowed_sources:
-            return TelegramLookupResult("unavailable", "Telegram source catalog is empty in memory facts.")
         if not self._settings.telegram_api_id or not self._settings.telegram_api_hash.strip() or not self._settings.telegram_session_path.strip():
             return TelegramLookupResult("unavailable", "Telegram MTProto settings are not configured.")
         selected_sources = self._select_sources(request=request, user_text=user_text, allowed_sources=allowed_sources)
@@ -74,6 +72,10 @@ class TelegramContextService:
             for source in selected_sources:
                 try:
                     entity = await client.get_entity(source.ref)
+                    # An explicit personal-chat request grants access only to a User.
+                    if source.kind == "user" and not isinstance(entity, User):
+                        failures.append(f"{source.ref}: Requested personal chat resolves to a non-user entity.")
+                        continue
                     kind = "channel" if isinstance(entity, Channel) and bool(getattr(entity, "broadcast", False)) else "group" if isinstance(entity, (Channel, Chat)) else "user" if isinstance(entity, User) else "unknown"
                     title = self._source_title(entity, source.ref)
                     cutoff = local_now() - timedelta(hours=self._history_hours(kind))
@@ -89,7 +91,11 @@ class TelegramContextService:
                                 break
                         elif message_date and message_date < cutoff:
                             break
-                        text, media_kind = await self._message_text(client, message)
+                        text, media_kind = await self._message_text(
+                            client,
+                            message,
+                            transcribe_media=kind != "channel",
+                        )
                         if text:
                             source_messages.append({
                                 "source": title,
@@ -154,13 +160,16 @@ class TelegramContextService:
         requested_kind = str(request.get("source_kind", "")).strip().lower()
         direct = self._direct_source_refs(f"{user_text}\n{request.get('query', '')}")
         by_ref = {source.ref.casefold(): source for source in allowed_sources}
+        explicit_refs = {self._normalize_ref(ref).casefold() for ref in self._direct_source_refs(user_text)}
         if not direct:
             return [source for source in allowed_sources if source.kind == requested_kind] if requested_kind in {"user", "group", "channel"} else []
         selected: list[TelegramSource] = []
         for ref in dict.fromkeys(self._normalize_ref(source) for source in direct):
             source = by_ref.get(ref.casefold())
             if source is None:
-                return None
+                if ref.casefold() not in explicit_refs or requested_kind not in {"user", "unspecified", ""}:
+                    return None
+                source = TelegramSource(ref, "user")
             if requested_kind in {"user", "group", "channel"} and source.kind != requested_kind:
                 return []
             selected.append(source)
@@ -182,17 +191,25 @@ class TelegramContextService:
         value = self._settings.telegram_channel_history_hours if kind == "channel" else self._settings.telegram_dialog_history_hours
         return max(1, int(value))
 
-    async def _message_text(self, client: Any, message: Any) -> tuple[str, str]:
+    async def _message_text(
+        self,
+        client: Any,
+        message: Any,
+        *,
+        transcribe_media: bool = True,
+    ) -> tuple[str, str]:
         text = str(getattr(message, "message", "") or "").strip()
         media_kind = self._media_kind(message)
         if not media_kind:
             return text, ""
+        if not transcribe_media:
+            return text, media_kind
         try:
             raw = await client.download_media(message, file=bytes)
             transcript = await self._speech_to_text.transcribe_bytes(
                 raw=raw or b"", file_name=f"telegram-{getattr(message, 'id', 'media')}.{ 'mp4' if media_kind == 'video' else 'ogg'}", mime_type="video/mp4" if media_kind == "video" else "audio/ogg"
             )
-        except (SpeechToTextError, OSError, ValueError) as exc:
+        except (SpeechToTextError, OSError, ValueError, IndexError) as exc:
             self._logger.warning("Telegram media transcription failed: %s", exc)
             return text, media_kind
         return f"{text}\n{transcript}".strip(), media_kind

@@ -9,9 +9,10 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Coroutine
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import uvicorn
 
@@ -21,6 +22,7 @@ if __package__ in (None, ""):
 from lumen.config import Settings
 from lumen.connectors.ollama import OllamaConnector
 from lumen.memory.store import MemoryStore
+from lumen.memory_admin_ui import MEMORY_ADMIN_HTML
 from lumen.models import (
     ChatAcceptedResponse,
     ChatRequest,
@@ -38,11 +40,16 @@ from lumen.services.chat_only import ChatOnlyService
 from lumen.services.context_executor import ContextExecutor
 from lumen.timezones import kyiv_timezone
 from lumen.services.delivery import DeliveryService
+from lumen.services.conversation import ConversationService
 from lumen.services.calendar_actions import CalendarActionService
 from lumen.services.home_assistant_calendar import CalendarEvent, HomeAssistantCalendarClient
 from lumen.services.knowledge import KnowledgeService
 from lumen.services.memory import MemoryService
+from lumen.services.memory_admin import (
+    FactDelete, FactEdit, MemoryAdminService, MemoryPreview, require_local_admin,
+)
 from lumen.services.news_processing import NewsProcessingBusyError, NewsProcessingService
+from lumen.services.nutrition import NutritionService
 from lumen.services.reminders import ReminderService, normalize_delivery_route
 from lumen.services.reminder_wake import WindowsWakeAdapter
 from lumen.services.speech_to_text import SpeechToTextError, SpeechToTextService
@@ -78,6 +85,9 @@ ollama = OllamaConnector(
     debug_dump_path=settings.ollama_debug_dump_path,
 )
 delivery_service = DeliveryService(settings, logger=logger)
+memory_service = MemoryService(memory_store, ollama, settings, default_user_id="global", logger=logger)
+conversation_service = ConversationService(memory_service, delivery_service, logger=logger,
+    task_starter=lambda coroutine: _start_background_task(coroutine, label="conversation indexing"))
 reminder_service = ReminderService(
     database.session,
     delivery_service,
@@ -86,6 +96,7 @@ reminder_service = ReminderService(
     missed_grace_minutes=settings.reminder_grace_minutes,
     default_snooze_minutes=settings.reminder_snooze_minutes,
     management_session_minutes=settings.reminder_management_session_ttl_minutes,
+    conversation_service=conversation_service,
 )
 
 
@@ -117,7 +128,7 @@ async def _project_calendar_events(entity_id: str, events: tuple[CalendarEvent, 
     if _calendar_delivery_route is None:
         return
     active_source_refs: set[str] = set()
-    user_id = settings.lumen_user_id.strip() or "VST"
+    user_id = settings.lumen_user_id
     for event in events:
         source_ref = _calendar_source_ref(event)
         text = _calendar_reminder_text(event)
@@ -180,17 +191,18 @@ if settings.home_assistant_token.strip() and settings.home_assistant_calendar_wr
     )
 elif settings.home_assistant_calendar_write_entity_id.strip():
     logger.warning("Home Assistant calendar creation disabled: token is missing")
-memory_service = MemoryService(memory_store, ollama, settings, default_user_id="global", logger=logger)
 speech_to_text_service = SpeechToTextService(settings, logger=logger)
+nutrition_service = NutritionService(settings, ollama, delivery_service, logger=logger, conversation_service=conversation_service)
 telegram_context_service = TelegramContextService(settings, memory_store, speech_to_text_service, logger=logger)
 web_page_extractor = WebPageExtractor(logger=logger)
 web_search = DuckDuckGoWebSearch(logger=logger, page_extractor=web_page_extractor)
-context_executor = ContextExecutor(telegram_context_service, web_search, logger=logger)
+context_executor = ContextExecutor(telegram_context_service, web_search, logger=logger,
+                                   nutrition_store=nutrition_service.store if settings.nutrition_enabled else None, nutrition_timezone=nutrition_service.timezone)
 news_processing_service = NewsProcessingService(
     extractor=web_page_extractor,
     ollama=ollama,
     memory_service=memory_service,
-    default_user_id=settings.lumen_user_id.strip() or "VST",
+    default_user_id=settings.lumen_user_id,
     logger=logger,
 )
 chat_service = ChatOnlyService(
@@ -201,6 +213,7 @@ chat_service = ChatOnlyService(
     context_executor=context_executor,
     reminder_service=reminder_service,
     calendar_action_service=calendar_action_service,
+    conversation_service=conversation_service,
     ollama_stream_idle_timeout_seconds=settings.ollama_stream_idle_timeout_seconds,
     logger=logger,
 )
@@ -208,36 +221,57 @@ knowledge_service = KnowledgeService(
     memory_store,
     ollama,
     settings,
-    default_user_id=settings.lumen_user_id.strip() or "VST",
+    default_user_id=settings.lumen_user_id,
     logger=logger,
 )
+memory_admin_service = MemoryAdminService(
+    memory_store, fact_context=memory_service._fact_context, chat_service=chat_service,
+    user_id=settings.lumen_user_id, logger=logger,
+)
 app = FastAPI(title="Lumen")
+app.state.background_tasks = set()
+
+
+def _start_background_task(coroutine: Coroutine[Any, Any, None], *, label: str) -> asyncio.Task[None]:
+    task = asyncio.create_task(coroutine)
+    app.state.background_tasks.add(task)
+
+    def on_done(completed: asyncio.Task[None]) -> None:
+        app.state.background_tasks.discard(completed)
+        try:
+            completed.result()
+        except asyncio.CancelledError:
+            logger.info("Background task cancelled: %s", label)
+        except Exception:
+            logger.exception("Background task failed: %s", label)
+
+    task.add_done_callback(on_done)
+    return task
 
 
 @app.on_event("startup")
 async def start_reminder_recovery() -> None:
+    _start_background_task(memory_service.recover_unprocessed_dialogue_turns(user_id=settings.lumen_user_id),
+                           label="dialogue index recovery")
     # Handles missed due times after Lumen or Windows was unavailable.
-    app.state.reminder_recovery_task = asyncio.create_task(reminder_service.run_due())
+    app.state.reminder_recovery_task = _start_background_task(reminder_service.run_due(), label="reminder recovery")
     if calendar_client is not None:
-        app.state.home_assistant_calendar_task = asyncio.create_task(calendar_client.run_forever())
+        app.state.home_assistant_calendar_task = _start_background_task(calendar_client.run_forever(), label="Home Assistant calendar")
 
 
 @app.on_event("shutdown")
 async def stop_home_assistant_calendar() -> None:
-    if calendar_client is None:
-        return
-    calendar_client.stop()
-    task = getattr(app.state, "home_assistant_calendar_task", None)
-    if task is not None:
+    if calendar_client is not None:
+        calendar_client.stop()
+    tasks = tuple(app.state.background_tasks)
+    for task in tasks:
         task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _user_id(value: object | None) -> str:
-    return str(value or settings.lumen_user_id).strip() or "VST"
+    return str(value or settings.lumen_user_id).strip() or settings.lumen_user_id
 
 
 def _request_id() -> str:
@@ -283,7 +317,7 @@ async def home() -> dict[str, str]:
 @app.post("/chat", response_model=ChatAcceptedResponse, status_code=202)
 async def chat(payload: ChatRequest) -> ChatAcceptedResponse:
     request_id = _request_id()
-    asyncio.create_task(chat_service.process_chat_request(payload, request_id))
+    _start_background_task(chat_service.process_chat_request(payload, request_id), label=f"chat request={request_id}")
     return ChatAcceptedResponse(request_id=request_id)
 
 
@@ -291,6 +325,10 @@ async def chat(payload: ChatRequest) -> ChatAcceptedResponse:
 async def connector(payload: ConnectorRequest) -> ConnectorResponse:
     request_id = _request_id()
     callback_metadata = _callback_metadata(payload)
+    if payload.event_type == "nutrition_delivery":
+        _start_background_task(_process_nutrition_event(payload, request_id, callback_metadata),
+                               label=f"nutrition delivery request={request_id}")
+        return ConnectorResponse(request_id=request_id, handled=True, reason="nutrition_delivery")
     if payload.event_type == "reminder_confirmed":
         answer = str(payload.data.get("answer") or payload.text or "Так").strip()
         reminder_id = payload.data.get("reminder_id")
@@ -299,6 +337,12 @@ async def connector(payload: ConnectorRequest) -> ConnectorResponse:
             return ConnectorResponse(request_id=request_id, status="ignored", handled=False, reason="legacy_reminder_confirmation_missing_delivery_id")
         user_text = answer
     elif payload.event_type == "attachment" and payload.file is not None:
+        if settings.nutrition_enabled and payload.source == "telegram" and nutrition_service.is_image(payload.file):
+            _start_background_task(
+                _process_nutrition_event(payload, request_id, callback_metadata),
+                label=f"nutrition request={request_id}",
+            )
+            return ConnectorResponse(request_id=request_id, handled=True)
         file_name = str(payload.file.name or "voice-message")
         mime_type = str(payload.file.mime_type or "")
         if not speech_to_text_service.is_speech_attachment(file_name=file_name, mime_type=mime_type):
@@ -309,6 +353,13 @@ async def connector(payload: ConnectorRequest) -> ConnectorResponse:
             )
         except SpeechToTextError as exc:
             logger.warning("Speech transcription failed request=%s: %s", request_id, exc)
+            request = ChatRequest(text=payload.text or "[Голосове/відеоповідомлення]", user_id=_user_id(payload.user_id), metadata=dict(payload.data))
+            await conversation_service.finish(
+                user_id=request.user_id, question=request.text,
+                answer="Не вдалося розпізнати голосове або відеоповідомлення. Спробуй надіслати його ще раз.",
+                request_id=request_id, source=payload.source, kind="speech", execution_outcome="error",
+                event_id=chat_service._event_id(request, callback_metadata), callback_metadata=callback_metadata,
+                store_memory=request.user_id.casefold() != "global" and not chat_service._memory_disabled(payload.data, callback_metadata))
             return ConnectorResponse(request_id=request_id, status="ignored", handled=False, reason="speech_transcription_failed")
         text = str(payload.text or "").strip()
         user_text = f"{text}\n\n{transcript}" if text else transcript
@@ -316,14 +367,30 @@ async def connector(payload: ConnectorRequest) -> ConnectorResponse:
         user_text = str(payload.text)
     else:
         return ConnectorResponse(request_id=request_id, status="ignored", handled=False, reason="unsupported_connector_event")
-    asyncio.create_task(
-        chat_service.process_chat_request_with_context(
-            ChatRequest(text=user_text, user_id=_user_id(payload.user_id), metadata=dict(payload.data)),
-            request_id,
-            callback_metadata=callback_metadata,
-        )
+    _start_background_task(
+        _process_connector_text(payload, user_text, request_id, callback_metadata),
+        label=f"connector request={request_id}",
     )
     return ConnectorResponse(request_id=request_id, handled=True)
+
+
+async def _process_connector_text(payload: ConnectorRequest, text: str, request_id: str,
+                                  callback_metadata: dict[str, object]) -> None:
+    normalized = payload.model_copy(update={"text": text, "event_type": "text" if payload.event_type == "attachment" else payload.event_type, "file": None})
+    await chat_service.process_connector_request(normalized, request_id,
+                                                 callback_metadata=callback_metadata,
+                                                 nutrition_service=nutrition_service)
+
+
+async def _process_nutrition_event(payload: ConnectorRequest, request_id: str,
+                                   callback_metadata: dict[str, object]) -> None:
+    if payload.event_type == "nutrition_delivery":
+        await nutrition_service.handle(payload, user_id=_user_id(payload.user_id), request_id=request_id,
+                                       callback_metadata=callback_metadata)
+    else:
+        await chat_service.process_connector_request(payload, request_id,
+                                                     callback_metadata=callback_metadata,
+                                                     nutrition_service=nutrition_service)
 
 
 @app.post("/knowledge/upload", response_model=KnowledgeUploadResult)
@@ -334,13 +401,24 @@ async def upload_knowledge(
     source_ref: str | None = Form(None),
     max_chunk_chars: int = Form(8000),
 ) -> KnowledgeUploadResult:
-    return await knowledge_service.upload(
-        file=file,
-        scope=scope,
-        ingest_user_id=user_id,
-        source_ref=source_ref,
-        max_chunk_chars=max_chunk_chars,
-    )
+    request_id = _request_id()
+    effective_user = _user_id(user_id)
+    question = f"[Завантаження знань] {file.filename or 'document'}"
+    try:
+        result = await knowledge_service.upload(
+            file=file, user_id=user_id, scope=scope, source_ref=source_ref, max_chunk_chars=max_chunk_chars)
+    except Exception:
+        await conversation_service.finish(user_id=effective_user, question=question,
+            answer="Не вдалося завантажити документ до бази знань.", request_id=request_id,
+            source="knowledge-api", kind="knowledge", execution_outcome="error", deliver=False)
+        raise
+    history = await conversation_service.finish(user_id=effective_user, question=question,
+        answer=result.message, request_id=request_id, source="knowledge-api", kind="knowledge",
+        turn_meta={"source_ref": result.source_ref, "scope": result.scope}, deliver=False)
+    if history.persistence_outcome == "failed":
+        # Ingestion has succeeded; don't misrepresent it as a failed upload or invite a duplicate.
+        logger.error("Knowledge uploaded but conversation persistence failed request=%s", request_id)
+    return result
 
 
 @app.post("/news/process", response_model=NewsProcessingResult)
@@ -355,22 +433,58 @@ async def process_news(payload: NewsProcessingRequest) -> NewsProcessingResult:
         ) from exc
 
 
-@app.get("/memory", response_class=HTMLResponse)
+@app.get("/memory", response_class=HTMLResponse, dependencies=[Depends(require_local_admin)])
 async def memory_manager() -> HTMLResponse:
-    return HTMLResponse("""<!doctype html><title>Lumen memory</title><h1>Lumen memory</h1>
-<form id=f><input id=q placeholder='Search'><button>Search</button></form><pre id=o></pre>
-<script>f.onsubmit=async e=>{e.preventDefault();let r=await fetch('/memory/debug-search',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({text:q.value,user_id:'VST'})});o.textContent=JSON.stringify(await r.json(),null,2)}</script>""")
+    return HTMLResponse(MEMORY_ADMIN_HTML, headers={
+        "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    })
+
+
+@app.get("/memory/admin/items", dependencies=[Depends(require_local_admin)])
+async def memory_admin_items() -> dict:
+    return await asyncio.to_thread(memory_admin_service.items)
+
+
+@app.get("/memory/admin/facts/{fact_id}", dependencies=[Depends(require_local_admin)])
+async def memory_admin_fact(fact_id: int) -> dict:
+    return await asyncio.to_thread(memory_admin_service.fact_details, fact_id)
+
+
+@app.patch("/memory/admin/facts/{fact_id}", dependencies=[Depends(require_local_admin)])
+async def memory_admin_update(fact_id: int, payload: FactEdit) -> dict:
+    return await memory_admin_service.update_fact(fact_id, payload)
+
+
+@app.delete("/memory/admin/facts/{fact_id}", dependencies=[Depends(require_local_admin)])
+async def memory_admin_delete(fact_id: int, payload: FactDelete) -> dict:
+    return await asyncio.to_thread(memory_admin_service.delete_fact, fact_id, payload.revision)
+
+
+@app.post("/memory/admin/preview", dependencies=[Depends(require_local_admin)])
+async def memory_admin_preview(payload: MemoryPreview) -> dict:
+    try:
+        return await memory_admin_service.preview(payload.text, payload.generate_answer)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Admin memory retrieval failed: %s", type(exc).__name__)
+        raise HTTPException(502, "Не вдалося отримати контекст пам’яті. Спробуй ще раз.") from exc
 
 
 @app.get("/memory/items")
-async def memory_items(user_id: str = "VST", item_type: str = "all", limit: int = 100) -> dict[str, object]:
+async def memory_items(user_id: str | None = None, item_type: str = "all", limit: int = 100) -> dict[str, object]:
+    user_id = _user_id(user_id)
     items: dict[str, object] = {}
     if item_type in {"all", "facts"}:
         items["facts"] = memory_store.list_facts(user_id, limit=max(1, min(limit, 500)))
     if item_type in {"all", "turns"}:
         items["turns"] = [turn.model_dump() for turn in memory_store.list_turns(user_id=user_id, limit=max(1, min(limit, 500)))]
     if item_type in {"all", "knowledge"}:
-        items["knowledge"] = [hit.model_dump() for hit in memory_store.list_embeddings(user_id=user_id, limit=max(1, min(limit, 500)))]
+        items["knowledge"] = [hit.model_dump() for hit in memory_store.list_embeddings(
+            user_id=user_id, limit=max(1, min(limit, 500)),
+            source_types=["knowledge_text_personal", "knowledge_text_global"],
+        )]
     return items
 
 
@@ -381,11 +495,17 @@ async def memory_debug_search(payload: ChatRequest) -> dict[str, object]:
 
 @app.post("/memory/delete")
 async def memory_delete(payload: dict[str, object]) -> dict[str, int]:
-    item_type, item_id, user_id = str(payload.get("type", "")), int(payload.get("id", 0)), _user_id(payload.get("user_id"))
+    raw_id = payload.get("id")
+    if isinstance(raw_id, bool) or not isinstance(raw_id, (int, str)) or not str(raw_id).strip().isdecimal():
+        raise HTTPException(status_code=400, detail="Item id must be a positive integer.")
+    item_id = int(raw_id)
+    if item_id <= 0:
+        raise HTTPException(status_code=400, detail="Item id must be a positive integer.")
+    item_type, user_id = str(payload.get("type", "")), _user_id(payload.get("user_id"))
     if item_type == "fact":
         return {"deleted": int(memory_store.delete_fact(user_id, item_id))}
     if item_type == "turn":
-        return {"deleted": int(memory_store.delete_turn(item_id))}
+        return {"deleted": memory_store.delete_turn_ids(user_id=user_id, turn_ids=[item_id])}
     if item_type == "knowledge":
         return {"deleted": memory_store.delete_embedding_ids(user_id=user_id, embedding_ids=[item_id])}
     raise HTTPException(status_code=400, detail="Unknown memory item type.")

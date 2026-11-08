@@ -2,6 +2,12 @@
 
 ## Now
 
+- Lumen nutrition EXE and HA helper wiring deployed 2026-10-08 (`docs/NUTRITION.md`); health/OpenAPI, HA config check, narrow reload and forwarder verified. Still verify one real food photo, portion correction and replies to an older photo/confirmation.
+
+- Packaged first greeting verified after the approved rebuild/start on 2026-08-31: all six mandatory rules and informal Ukrainian. Continue checking packaged semantic fact relevance and monitor `fact_retrieval` fallback and model-change reindexing.
+- Monitor automatic standing-rule classification: extraction is model-driven, so a misclassified task-local instruction remains possible. The scoped explicit inclusion update and operator manifest provide correction without changing the fact schema.
+- Expand fact-retrieval relevance checks on the real corpus: the multilingual coffee query finds the intended preference but also a temperature device alias at the calibrated threshold. Cosine candidates remain optional context, not guaranteed evidence; use debug match scores to guide further ranking/threshold calibration.
+
 - Rebuild/restart Lumen with Trafilatura and verify `POST /news/process` against one controlled real article and one RSS fallback without changing Home Assistant queues.
 - After the packaged endpoint is verified, replace the Home Assistant raw-news Ollama script with the `keep|skip|retry` contract; remove raw items only after `keep` or confirmed `skip`.
 
@@ -17,13 +23,19 @@
 
 ## Next
 
+- Migrate FastAPI startup/shutdown decorators to lifespan in a focused change;
+  the installed framework emits `on_event` deprecation warnings. Module-level
+  initialization remains a separate service-factory concern.
+
 - Run live checks for dialogue retrieval, stable-fact extraction, knowledge upload, and Ollama-compatible endpoints.
-- Simplify remaining legacy-only code inside `models.py`, `memory/store.py`, and `memory.py` in a separately reviewed pass.
+- Verify the next deployed artifact after the 2026-10-07 source cleanup, atomic knowledge replacement, configured user scoping and background-task lifecycle changes. Legacy execution models/store APIs/JSON seeds are removed; compatibility naming in `memory.py` remains a separate maintainability question.
 - Resolve the `StarletteDeprecationWarning` emitted by `fastapi.testclient`
   against the installed `httpx`; do not install or migrate dependencies without
   a separately scoped compatibility check.
 
 ## Later
+
+- Evaluate journal growth/retention before multi-year or multi-worker use: JSON/CSV are rewritten as complete files and the per-user lock covers one process only.
 
 - Reintroduce optional capabilities only as independent, tested integrations.
 
@@ -42,4 +54,16 @@
 ## Questions / TBD
 
 - Which optional capability, if any, should be rebuilt first after the clean chat core is proven stable?
-- If reminders return, should they be rebuilt as a narrow isolated integration instead of reviving the removed planner/skills/tasks stack?
+- Should module-level application initialization move into a service factory/lifespan in a separately scoped change? API tests now isolate initialization before importing the entrypoint.
+
+
+## Connector audit follow-ups — 2026-10-18
+- STT downloads still buffer the whole response and ffmpeg has no total execution deadline; add configurable byte/time bounds and failure cleanup in a separate focused change.
+- Shared routing now classifies ordinary text with conversation context; detailed nutrition analysis runs only for selected nutrition actions. Monitor configured-model routing on short, ambiguous follow-ups across services.
+- Verify real Telegram confirmation and reply correction after the 2026-10-18 restart; isolated live-photo/model validation does not exercise outgoing Telegram delivery.
+
+- After shared-context deployment, verify the real Telegram sequence food → daily summary → portion correction → updated summary; isolated configured-model verification has passed.
+
+- External HA callback acceptance and SQLite delivery marking cannot be one transaction: a crash in between can repeat a notification on retry. Stable event_id prevents repeating a committed journal action; receiver-side callback deduplication would be needed for a stronger transport guarantee.
+
+- Fact index concurrency: make the existing `FactContextService.sync_index()` live-hash check and index write atomic. Concurrent admin edits/deletes can currently leave a stale/orphan index row; retrieval rejects it by live hash/record checks, but cleanup should be verified with a race regression test. No schema migration is needed.

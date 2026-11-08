@@ -371,7 +371,7 @@ class ChatOnlyServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual("Reminder recorded.", result.answer)
-        self.assertEqual("skipped", result.persistence_outcome)
+        self.assertEqual("stored", result.persistence_outcome)
         self.assertEqual([], ollama.messages)
         self.assertEqual(1, len(reminder.contracts))
         self.assertEqual("create", reminder.contracts[0]["reminder"]["action"])
@@ -621,7 +621,7 @@ class ChatOnlyServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("assistant", "Previous answer"), messages)
         self.assertLess(messages.index(("assistant", "Previous answer")), messages.index(("user", "Why?")))
 
-    async def test_chat_only_omits_previous_turn_when_policy_disables_it(self) -> None:
+    async def test_chat_only_keeps_conversation_when_semantic_policy_disables_previous_turn(self) -> None:
         memory = FakeMemoryService()
         memory.retrieval_policy = {"include_previous_turn": False}
         memory.recent_dialogue_turns = lambda **kwargs: [
@@ -648,7 +648,7 @@ class ChatOnlyServiceTests(unittest.IsolatedAsyncioTestCase):
         await service.debug_memory_search(user_text="Hi", user_id="test-user")
 
         messages = [(item["role"], item["content"]) for item in ollama.messages]
-        self.assertNotIn(("user", "Previous question"), messages)
+        self.assertIn(("user", "Previous question"), messages)
 
     async def test_chat_only_delivers_after_persisting(self) -> None:
         memory = FakeMemoryService()
@@ -668,7 +668,7 @@ class ChatOnlyServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("Відповідь з діалогового режиму.", delivery.calls[0]["answer"])
         self.assertEqual(memory.stored_facts[0]["category"], "preference")
 
-    async def test_idle_dialogue_stream_discards_partial_answer_without_side_effects(self) -> None:
+    async def test_idle_dialogue_stream_keeps_user_context_without_partial_delivery(self) -> None:
         memory = FakeMemoryService()
         delivery = FakeDeliveryService()
         ollama = IdleStreamOllama()
@@ -687,12 +687,12 @@ class ChatOnlyServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("", result.answer)
         self.assertEqual("cancelled_idle", result.execution_outcome)
-        self.assertEqual("skipped", result.persistence_outcome)
+        self.assertEqual("stored", result.persistence_outcome)
         self.assertEqual("suppressed", result.delivery_outcome)
         self.assertEqual({"outcome": "cancelled_idle"}, result.metadata)
         self.assertEqual(12.0, ollama.stream_idle_timeout_seconds)
-        self.assertEqual({}, memory.stored_turn)
-        self.assertEqual([], memory.postprocessed_turn_ids)
+        self.assertEqual("", memory.stored_turn["answer"])
+        self.assertEqual([7], memory.postprocessed_turn_ids)
         self.assertEqual([], delivery.calls)
 
     async def test_same_user_requests_are_not_cancelled_and_both_deliver(self) -> None:

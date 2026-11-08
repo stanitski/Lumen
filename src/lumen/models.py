@@ -40,17 +40,7 @@ MemoryPredicate = Literal[
 KnowledgeUploadKind = Literal["text", "pdf", "docx", "xlsx", "pptx", "image", "video", "unsupported"]
 KnowledgeUploadStatus = Literal["indexed", "pending", "unsupported"]
 KnowledgeUploadSessionStatus = Literal["pending_scope", "completed", "failed", "cancelled"]
-ReminderStatus = Literal["pending", "sent", "awaiting_confirmation", "cancelled", "failed"]
-SkillScope = Literal["system", "user"]
-IntentKind = Literal["conversational", "action"]
-TaskStatus = Literal["pending", "active", "awaiting_input", "completed", "cancelled", "failed"]
-TaskRunStatus = Literal["queued", "running", "succeeded", "failed", "cancelled", "timed_out"]
-TaskExecutionMode = Literal["immediate", "scheduled", "recurring"]
-TaskRepeatPolicy = Literal["fixed_interval", "after_completion"]
-PlanDecision = Literal["ready_to_execute", "needs_clarification", "safe_response"]
-PolicyOutcome = Literal["allow", "confirm", "deny"]
 ExecutionOutcome = Literal["ok", "partial", "error", "awaiting_confirmation", "cancelled_idle"]
-DeliveryMode = Literal["callback", "inline", "none"]
 PersistenceOutcome = Literal["stored", "skipped", "failed"]
 DeliveryOutcome = Literal["delivered", "domain_delivered", "inline", "suppressed", "failed", "not_attempted"]
 KnowledgeScope = Literal["personal", "global"]
@@ -62,22 +52,11 @@ ConnectorEventType = Literal[
     "button_press",
     "reminder_confirmed",
     "knowledge_scope_selected",
+    "nutrition_delivery",
 ]
 ConnectorStatus = Literal["accepted", "pending", "ignored"]
 NewsProcessingStatus = Literal["keep", "skip", "retry"]
 NewsContentSource = Literal["article", "rss"]
-
-
-class MemoryHit(BaseModel):
-    id: int
-    user_id: str
-    category: MemoryCategory
-    subject: str
-    predicate: MemoryPredicate
-    value: str
-    confidence: float
-    importance: int
-    source_ref: str
 
 
 class ConversationTurnRecord(BaseModel):
@@ -306,186 +285,6 @@ class KnowledgeUploadSessionRecord(BaseModel):
     created_at: str
     resolved_at: str | None = None
     metadata: dict[str, object] = Field(default_factory=dict)
-
-
-class HomeAssistantEntityRecord(BaseModel):
-    entity_id: str
-    domain: str
-    state: str
-    friendly_name: str = ""
-    unit_of_measurement: str = ""
-    device_class: str = ""
-    area_name: str = ""
-    device_name: str = ""
-    aliases: list[str] = Field(default_factory=list)
-    attributes: dict[str, object] = Field(default_factory=dict)
-    search_text: str = ""
-    is_readable: bool = True
-    is_actionable: bool = False
-    last_synced_at: str
-
-
-class SkillRecord(BaseModel):
-    skill_id: str
-    intent_id: str
-    scope: SkillScope
-    owner_user_id: str | None = None
-    enabled: bool = True
-    priority: int = 50
-    description: str = ""
-    tags: list[str] = Field(default_factory=list)
-    variables_schema: dict[str, object] = Field(default_factory=dict)
-    steps: list[dict[str, object]] = Field(default_factory=list)
-    embedding: list[float] = Field(default_factory=list)
-    content_hash: str = ""
-    created_at: str
-    updated_at: str
-
-class IntentRecord(BaseModel):
-    intent_id: str
-    kind: IntentKind
-    enabled: bool = True
-    description: str = ""
-    is_default: bool = False
-    created_at: str
-    updated_at: str
-
-
-class SkillPlanItem(BaseModel):
-    skill_id: str
-    variables: dict[str, object] = Field(default_factory=dict)
-
-
-class SkillPlanResponse(BaseModel):
-    selected_skills: list[SkillPlanItem] = Field(default_factory=list)
-    action_intent: str = ""
-    decision: PlanDecision = "ready_to_execute"
-    clarification_question: str = ""
-    clarification_reason: str = ""
-    debug_trace: dict[str, object] = Field(default_factory=dict)
-
-
-class ExecutionAction(BaseModel):
-    action_id: str
-    skill_id: str
-    variables: dict[str, object] = Field(default_factory=dict)
-    capabilities: list[str] = Field(default_factory=list)
-    expected_side_effects: list[str] = Field(default_factory=list)
-
-
-class ExecutionPlan(BaseModel):
-    plan_id: str
-    request_id: str
-    action_intent: str = ""
-    actions: list[ExecutionAction] = Field(default_factory=list)
-    clarification_required: bool = False
-    metadata: dict[str, object] = Field(default_factory=dict)
-
-
-class PolicyDecision(BaseModel):
-    action_id: str
-    outcome: PolicyOutcome
-    reason: str = ""
-    confirmation_evidence: dict[str, object] = Field(default_factory=dict)
-    metadata: dict[str, object] = Field(default_factory=dict)
-
-
-class ActionExecutionResult(BaseModel):
-    action_id: str
-    skill_id: str
-    outcome: ExecutionOutcome
-    message: str = ""
-    responses: list[str] = Field(default_factory=list)
-    state_changes: list[dict[str, object]] = Field(default_factory=list)
-    metadata: dict[str, object] = Field(default_factory=dict)
-
-
-class ExecutionResult(BaseModel):
-    plan_id: str
-    request_id: str
-    outcome: ExecutionOutcome
-    actions: list[ActionExecutionResult] = Field(default_factory=list)
-    primary_answer: str = ""
-    metadata: dict[str, object] = Field(default_factory=dict)
-
-
-class DeliveryEnvelope(BaseModel):
-    request_id: str
-    user_id: str
-    kind: DeliveryKind = "chat"
-    mode: DeliveryMode = "callback"
-    answer: str = ""
-    voice: bool = False
-    metadata: dict[str, object] = Field(default_factory=dict)
-
-
-class TaskRecord(BaseModel):
-    id: int
-    user_id: str
-    source_ref: str
-    skill_id: str | None = None
-    task_group_id: str | None = None
-    parent_task_id: int | None = None
-    status: TaskStatus = "pending"
-    execution_mode: TaskExecutionMode = "immediate"
-    due_at: str | None = None
-    repeat_policy: TaskRepeatPolicy | None = None
-    repeat_interval_seconds: int | None = None
-    repeat_count: int | None = None
-    repeat_until: str | None = None
-    run_count: int = 0
-    priority: int = 50
-    payload: dict[str, object] = Field(default_factory=dict)
-    steps: list[dict[str, object]] = Field(default_factory=list)
-    requires_confirmation: bool = False
-    created_at: str
-    updated_at: str
-    completed_at: str | None = None
-    cancelled_at: str | None = None
-    last_error: str = ""
-
-
-class TaskRunRecord(BaseModel):
-    id: int
-    task_id: int
-    task_group_id: str | None = None
-    status: TaskRunStatus = "queued"
-    started_at: str | None = None
-    finished_at: str | None = None
-    result: dict[str, object] = Field(default_factory=dict)
-    error_text: str = ""
-    cancelled_by_task_id: int | None = None
-
-
-class ReminderActionPayload(BaseModel):
-    text: str
-    due_at: str | None = None
-    duration_seconds: int | None = Field(default=None, ge=1)
-    repeat_interval_seconds: int | None = Field(default=None, ge=1)
-    repeat_until: str | None = None
-
-
-class ReminderRecord(BaseModel):
-    id: int
-    user_id: str
-    source_ref: str
-    text: str
-    due_at: str
-    status: ReminderStatus
-    created_at: str
-    sent_at: str | None = None
-    repeat_interval_seconds: int | None = None
-    repeat_until: str | None = None
-    metadata: dict[str, object] = Field(default_factory=dict)
-
-
-class ReminderRequest(BaseModel):
-    user_id: str
-    source_ref: str
-    text: str
-    due_at: str
-    repeat_interval_seconds: int | None = Field(default=None, ge=1)
-    repeat_until: str | None = None
 
 
 class KnowledgeUploadRequest(BaseModel):

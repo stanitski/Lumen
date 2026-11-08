@@ -1,4 +1,111 @@
+## 2026-11-08 — Source starter для іншого користувача
+
+## 2026-11-09 — Memory administration dashboard
+
+- Replaced the minimal `/memory` form with a Ukrainian dashboard for fact browsing, filtering, editing/deletion, retrieval inspection and non-persisting answer previews.
+- Preview sources are frozen from the exact supplied context, with edit actions on those fact revisions and repeat-answer comparison. Knowledge hits are included alongside their prompt text.
+- Added loopback-only `/memory/admin/*`, server-owned scope, same-origin checks and optimistic fact writes; stale revisions return 409. Existing memory endpoints and SQLite schema remain compatible.
+- Fact edits invalidate stale embeddings atomically and run existing index synchronization; index failure is reported separately from successful storage. Added isolated API/storage regression tests and `docs/MEMORY_ADMIN.md`.
+- Verification: 77 focused tests passed; Python/JavaScript syntax and diff whitespace checks passed. Browser QA on synthetic isolated data verified source-linked editing, stale snapshots, repeat-answer comparison and responsive layout. Packaged EXE smoke verified page/items/edit/delete on isolated SQLite.
+- Deployment: staged EXE rebuilt, previous EXE and consistent database backup saved under `data/backups/memory-admin-20261109-005740`, then `dist/Lumen.exe` replaced and restarted. Live `/memory` and admin inventory verified: 45 facts and 1260 conversation records. Live real-model answer preview succeeded without adding any conversation record or fact.
+
+
+- Додано allowlist-пакувальник `scripts/package_starter.py`: ZIP із source,
+  окремим env template, SETUP/START та інструкцією `docs/DISTRIBUTION.md`.
+- Runtime дані, авторські credentials, Telegram sessions і готовий EXE не входять
+  у пакет. Початковий доступ локальний; HA/Telegram налаштовуються окремо.
+- Це source starter з інтернет-установкою залежностей, не автономний installer.
+- Додано onboarding користувача/доступів, auto-init SQLite, HA/Telegram та
+  перенесений BUILD launcher з правилами розташування EXE й окремої перевірки.
+- SETUP_OLLAMA встановлює Ollama через winget за потреби, перевіряє локальний
+  сервер і завантажує всі моделі з власного `.env`; runtime автора не змінюється.
+
+## 2026-11-01 — HA повідомлення про відсутність живлення
+
+- Live `Lumen Connector` відповідає у Telegram та завершує обробку, коли
+  `binary_sensor.power_input` і сенсор доступності комп’ютера мають стан `off`.
+  Якщо комп’ютер працює, запит передається Lumen. Реальну доставку не перевірено.
+
+## 2026-10-31 — STT language auto-detection trial
+
+- Local runtime STT_LANGUAGE cleared to enable per-attachment language detection
+  for Ukrainian/Russian speech. Restart required; mixed-language accuracy must
+  be checked on real recordings. To restore the previous setting use STT_LANGUAGE=uk
+  and restart Lumen.
+
+## 2026-10-31 — Split long Telegram text responses
+
+- Split oversized non-voice Telegram callbacks into sequential bounded parts,
+  preserving request identity and adding part metadata. Stop on delivery failure.
+- Added Unicode, content preservation, routing and failure regression tests.
+  25 focused tests passed. Rebuilt/restarted EXE; OpenAPI HTTP 200.
+  Existing HA forwarder verified queued; three split callbacks accepted with a
+  non-delivery sentinel target. Actual Telegram receipt remains unverified.
+  EXE/SQLite backup: data/backups/telegram-split-20261031-012154/.
+
 # Lumen Change Log
+
+## 2026-10-27 — Explicit Telegram personal-chat permission
+
+- Direct user-provided person refs authorize bounded private-chat reads without
+  a saved source fact, including when the catalog is empty. Model-only refs
+  cannot grant access; resolved personal-chat entities must be `User`.
+- Routing prompt describes the permission; channel/group policy is preserved.
+- Added regression coverage for explicit users, model-only refs, empty catalogs
+  and non-user entity rejection. Packaged runtime requires rebuild/restart.
+
+## 2026-10-08 — Telegram food-photo journal in CSV
+
+- Approved HA deployment: rebased two Lumen automations on fresh live YAML,
+  added two helper scripts and sent correlation; unrelated entries preserved.
+  Normalized captured Telegram metadata to avoid datetime-dict rendering as
+  a string. Live HA template checks, `ha core check`, script/automation reload
+  and HA REST → Lumen/loaded-forwarder checks passed without meal writes or
+  Telegram sending. Real-photo delivery remains pending; no Core restart.
+  Backup: `/homeassistant/backups/lumen-nutrition-20261008-115807/`.
+
+- Approved Lumen restart: previous EXE and consistent SQLite backup saved to
+  `data/backups/restart-20261008-114246/`; 44 focused tests and isolated packaged
+  timezone smoke passed. Rebuilt EXE includes nutrition modules; deployed
+  health/OpenAPI HTTP 200 on port 8010 with `nutrition_delivery` in schema.
+  HA was deployed subsequently as recorded above; actual photo/Telegram checks
+  remain pending.
+
+- Added structured Ollama photo estimates, caption priority, ambiguous-food
+  clarification and latest/reply-selected portion corrections.
+- Added authoritative per-user JSON plus recoverable four-column UTF-8 BOM CSV,
+  per-user serialization and message deduplication; SQLite schema is unchanged.
+- Wired photo/text routing and HA sent-message correlation through `/connector`;
+  bounded exact-origin photo download carries HA credentials without redirects.
+- Prepared a local HA helper package and wiring guide in `docs/NUTRITION.md`.
+  During source preparation, live HA and EXE were not changed; the subsequent
+  approved Lumen and HA deployments are recorded above.
+- Verification: 42 isolated nutrition/API tests; all 238 project tests passed
+  in the project `.venv`. Syntax, YAML/native templates and diff whitespace
+  checked. Actual model estimates and HA delivery remain deployment checks.
+
+## 2026-10-07 — Source cleanup and data-integrity fixes
+
+- Removed unused planner/skills/tasks/HA-catalog models and store methods,
+  disabled legacy reminder APIs and two unused JSON seeds; kept schema and timezone data.
+- Fixed knowledge re-upload data loss: validate the complete embedding batch
+  before atomic document replacement, including rollback on SQLite failure.
+- Replaced repeated fact-list scans with ID maps and per-request lexical
+  scores. Synthetic 2000-fact comparison produced identical full output;
+  median processing time was 179 ms before and 16 ms after (no model/network I/O).
+- Memory UI/API use normalized configured user; turn deletion is user-scoped
+  and malformed IDs return 400. Background tasks are tracked and awaited on shutdown.
+- Fixed Windows `run.bat` to use checkout-local Python and Settings host/port;
+  ignored generated `data/runtime`. API tests now isolate configuration before app import.
+- Verification: baseline 184 unit tests passed; knowledge regression reproduced
+  the original failure and now passes model-error/cancellation/invalid-batch/rollback cases.
+  Final regression: 196 tests passed with isolated DB/integrations;
+  `run.bat --timezone-smoke` passed from an external working directory.
+  Source syntax, Markdown links and `git diff --check` passed.
+- Approved restart: old EXE and SQLite backed up to
+  `data/backups/restart-20261007-181158/`; rebuilt EXE passed isolated timezone
+  smoke, then started from `dist/Lumen.exe`. Health/OpenAPI return HTTP 200
+  on port 8010; full external-integration verification remains separate.
 
 ## 2026-10-07 — Documentation aligned with local implementation
 
@@ -548,3 +655,37 @@
 - Changed files: `src/lumen/config.py`, `.env.example`
 - Reason: align the Lumen default and example keep-alive duration with the active five-minute policy, allowing inactive models to release VRAM sooner.
 - Runtime risk: low, because only cold-start latency after five idle minutes can increase.
+
+
+## 2026-10-18 — photo ingress fix and targeted audit
+- Узгоджено локальний `HOME_ASSISTANT_URL` із фактичним HA photo origin після реального збою; origin guard збережено.
+- Nutrition failures розрізняють download/analysis/metadata/load/save, без misleading Excel advice для фото чи моделі.
+- STT передає HA bearer лише точному origin; HTTP/redirect failures перетворюються на санітизований service error.
+- Додано регресійні перевірки download/model errors, origin lookalikes, port/scheme, credentials і HTTP failures.
+
+- Real-photo validation виявила default-thinking timeout та optional estimate omission: nutrition використовує `think=False` і required nullable estimate schema.
+- Real HA/Ollama photo + reply-half пройшли з isolated CSV (450 → 225 ккал), без запису до production journal і без Telegram test messages.
+
+
+## 2026-10-18 — text nutrition entries
+- Явний опис «додай/запиши їжу» створює окремий прийом без фото, включно з першим записом журналу.
+- Нові записи використовують час повідомлення, не успадковують попередню порцію; виправлення та reply зберігають цільовий запис.
+- Нове уточнення (`new_entry=true`) ізольоване від попередньої їжі. Невідомий reply залишається звичайним chat.
+- 48 focused nutrition/API tests passed; live configured-model isolated CSV: coffee/cookies 350, banana 90, half banana 45 kcal, two rows preserved.
+
+- Full isolated suite after text support: 247 tests passed.
+
+
+## 2026-10-18 — спільний контекст усіх сервісів
+- Додано ConversationService: спільне збереження користувацьких запитів/відповідей, статусів доставки, стабільних event_id і відновлення після тимчасових збоїв без зміни SQLite schema.
+- Хронологічна історія доступна перед маршрутизацією та перед генерацією відповіді; фільтр чату застосовується до LIMIT. Explicit reply додає пов’язаний діалог до контексту.
+- Харчування, reminder/calendar acknowledgements, доставлені нагадування, STT failures і knowledge upload входять до історії. Обробка новин залишається ізольованою.
+- Nutrition summary/read читає authoritative JSON; сума рахується кодом з урахуванням виправлень і налаштованого часового поясу. Disabled nutrition не читає журнал.
+- Індексація в packaged runtime виконується tracked background task після збереження/доставки; останні повідомлення доступні без embeddings. Startup запускає bounded recovery для configured user.
+- Реальна модель в ізольованому сховищі: запис 350 → підсумок 350 → половина 175 → підсумок 175; 4 спільні репліки, повторна доставка пригнічена. Production journal/Telegram під час перевірки не змінювалися.
+
+- Final validation: 282 isolated tests passed; EXE rebuilt/restarted, HTTP health 200. Existing production journal read-only summary: 2 meals / 800 kcal; live Telegram follow-up remains manual.
+
+
+## 2026-10-18 — remove separate HA nutrition correlation
+- За вказівкою користувача видалено live automation `lumen_nutrition_sent_correlation` і її блок із HA example. Основний connector/callback не змінено. Нові reply-to-bot прив’язки більше не створюються; reply на оригінал і виправлення останнього запису збережені.

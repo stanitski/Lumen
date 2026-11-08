@@ -2,14 +2,15 @@
 
 ## 1. Паспорт проєкту
 
-Документ звірено з локальним source гілки `codex/ollama-stream-watchdog` на
-2026-10-07; ця звірка не підтверджує deployed executable чи external health.
+Документ звірено з локальним source 2026-10-18; ця звірка не підтверджує
+deployed executable чи external health.
 
 Lumen — локальний персональний AI-асистент із FastAPI API, Ollama та
-SQLite-backed пам’яттю. Він приймає текстові запити, транскрибує підтримувані
-audio/video attachments, добирає релевантні facts, dialogue та knowledge,
-отримує відповідь від Ollama і повертає її inline або доставляє через Home
-Assistant callback.
+SQLite-backed пам’яттю. `ConversationService` зберігає спільну chronological
+history user-facing взаємодій; bounded recent context подається до routing і
+формування відповіді. Lumen приймає текстові запити, транскрибує підтримувані
+audio/video attachments, добирає facts, dialogue та knowledge, отримує
+відповідь від Ollama і повертає її inline або доставляє через Home Assistant.
 
 Основна мова коду — Python 3.11+. Основні framework і libraries визначені в
 `pyproject.toml`: FastAPI, Uvicorn, Pydantic, `pydantic-settings`, `httpx`,
@@ -18,8 +19,8 @@ Telethon, `faster-whisper` і `pypdf`.
 Точка входу — `src/lumen/main.py`; FastAPI application — `app`. Source runtime
 запускається через Uvicorn. `compile.bat` збирає one-file `Lumen.exe`.
 
-Поточний статус: active chat-memory-knowledge core із двома вузькими
-side-effect integrations — reminders і calendar, та окремим synchronous news
+Поточний статус: active chat-memory-knowledge core із трьома вузькими
+side-effect integrations — reminders, calendar та nutrition, та окремим synchronous news
 processing. Поточна schema:
 `CURRENT_SCHEMA_VERSION = 34`. Зовнішні live integrations після rebuild/restart
 ще потребують ручної перевірки.
@@ -48,14 +49,16 @@ processing. Поточна schema:
 ```text
 FastAPI ingress
   -> ChatOnlyService
+     -> ConversationService (recent context, persistence, delivery)
      -> MemoryService -> MemoryStore -> SQLite
-     -> ContextExecutor -> TelegramContextService | DuckDuckGoWebSearch
+     -> ContextExecutor -> TelegramContextService | DuckDuckGoWebSearch | NutritionStore
      -> OllamaConnector -> Ollama
      -> ReminderService -> DeliveryService | WindowsWakeAdapter
+     -> ConversationService (user-facing action results)
      -> CalendarActionService -> Home Assistant Calendar REST
      -> DeliveryService -> Home Assistant callback
 
-  -> NewsProcessingService
+  -> NewsProcessingService (request-driven Feedreader API; outside dialogue)
      -> WebPageExtractor -> public article | RSS fallback
      -> MemoryService -> exact user news dislikes
      -> OllamaConnector -> editorial classification + Ukrainian 5W
@@ -67,6 +70,11 @@ HomeAssistantCalendarClient
 SpeechToTextService
   -> normalized text
   -> ChatOnlyService
+
+Telegram photos/corrections
+  -> NutritionService -> OllamaConnector
+  -> NutritionStore -> authoritative JSON + CSV
+  -> ConversationService -> HA callback + sent correlation
 ```
 
 `ChatOnlyService` є центральним orchestrator. Реалізація неоднорідна:
@@ -87,12 +95,13 @@ calendar read проєктує events у reminders.
    `SpeechToTextService.is_speech_attachment()`, завантажується через
    `transcribe_url()` і повертається в той самий text flow.
 4. `ChatOnlyService.process_chat_request_result()` визначає canonical user і
-   викликає `_build_dialogue_messages()`.
-5. `MemoryService.build_planner_context()` отримує query contract, embeddings,
+   завантажує bounded chronological history до routing.
+5. `MemoryService.build_planner_context()` використовує recent context для
+   query contract і отримує embeddings,
    facts, dialogue candidates та knowledge candidates. Незалежні SQLite reads
    виконуються паралельно через `asyncio.gather()` і `asyncio.to_thread()`.
 6. `ContextExecutor.execute()` обробляє дозволені context requests.
-   `telegram/search` і `web/search` мають live adapters;
+   `telegram/search`, `web/search` і `nutrition/summary` мають live adapters;
    `home_assistant/read_state` і contract-requested `knowledge/search`
    повертають `pending_implementation`.
 7. Structured reminder confirmation може short-circuit context build.
@@ -104,10 +113,11 @@ calendar read проєктує events у reminders.
    `OllamaConnector.stream_chat()`. До першого кадру timeout немає; далі
    watchdog обмежує лише 240 секунд тиші між валідними NDJSON frames. Idle
    partial не зберігається і не доставляється.
-9. Non-global turn записується через `MemoryService.add_turn()`. Після цього
-   callback delivery виконує `DeliveryService.deliver_chat_answer()`, а
-   `MemoryService.postprocess_dialogue_turn()` добуває durable facts і
-   оновлює metadata та embeddings.
+9. User-facing result проходить через `ConversationService.finish()`: turn
+   зберігається, за потреби доставляється callback і проходить post-processing.
+   Due reminder після успішної доставки записується як assistant-only event із
+   порожнім питанням та стабільним `delivery_id`; retry історії не повторює
+   доставку.
 10. `/chat` і `/connector` працюють background через
     `asyncio.create_task()` та повертають `202`. Ollama-compatible endpoints
     чекають результат і повертають його inline з `deliver=False`.
@@ -123,6 +133,9 @@ RSS text. `NewsProcessingService` відкидає редакційне сміт
 `429`, а тимчасові збої — `status=retry`. Якщо article недоступний і Feedreader
 не надав достатнього контексту, це terminal `skip` з
 `reason_code=insufficient_source_context`, а не нескінченний retry.
+News pipeline не обробляє всі dialogue turns і не додає внутрішні classifier,
+article-fetch чи Todo-plumbing events до conversation context. Окреме питання
+користувача про новини проходить звичайний chat/history path.
 
 ### Telegram і Home Assistant
 
@@ -141,11 +154,14 @@ Home Assistant виконує три окремі ролі:
 
 Generic Home Assistant entity-state read і device control не реалізовані.
 
-Chat ingress підтримує text/STT, без передачі фото до Ollama. Adapter
-`chat_multimodal()` серіалізує images, але knowledge OCR/vision, розпізнавання
-калорій і структурований nutrition journal не реалізовані. Межі image support
-та memory-suppression metadata flags описані в
-`docs/CHAT_ONLY_RUNTIME_CONTRACT_UA.md`.
+Telegram connector food photos і текстові виправлення тепер передаються до
+`NutritionService` → `chat_multimodal()` → authoritative JSON/CSV journal →
+`ConversationService` → HA callback. Структуровані записи журналу лишаються в
+authoritative JSON; користувацькі nutrition відповіді додаються до shared
+conversation history, а summary читається з JSON через `ContextExecutor`.
+Звичайний chat та Ollama-compatible ingress лишаються text/STT; knowledge OCR/vision
+відсутній. Контракт і HA helper: `docs/NUTRITION.md`; production deployment
+ще не виконано. Memory-suppression flags: `docs/CHAT_ONLY_RUNTIME_CONTRACT_UA.md`.
 
 ## 5. Карта ключових файлів
 
@@ -153,6 +169,7 @@ Chat ingress підтримує text/STT, без передачі фото до 
 |---|---|---|
 | `src/lumen/main.py` | API, wiring, startup/shutdown | `app`, `chat()`, `connector()`, `start_reminder_recovery()` |
 | `src/lumen/services/chat_only.py` | central orchestration | `ChatOnlyService`, `process_chat_request_result()`, `_build_dialogue_messages()` |
+| `src/lumen/services/conversation.py` | shared user-facing persistence/delivery | `ConversationService.finish()`, `record_event()` |
 | `src/lumen/services/memory.py` | contract, retrieval, facts, post-processing | `MemoryService`, `build_planner_context()`, `postprocess_dialogue_turn()` |
 | `src/lumen/memory/store.py` | SQLite queries і similarity search | `MemoryStore`, `add_turn()`, `search_turn_embeddings()`, `search_embeddings()` |
 | `src/lumen/storage/db.py` | schema та migrations | `Database`, `SCHEMA`, `CURRENT_SCHEMA_VERSION` |
@@ -171,6 +188,8 @@ Chat ingress підтримує text/STT, без передачі фото до 
 ## 6. Актуальні абстракції
 
 - Orchestration: `ChatOnlyService`, без універсального action engine.
+- Shared conversation lifecycle: `ConversationService` з bounded recent context,
+  persistence, callback delivery та idempotent assistant-only event recording.
 - External context: `ContextExecutor` із дозволеними source/operation pairs та
   truthful unavailable statuses.
 - Side effects: окремі `ReminderService` і `CalendarActionService`; вони не
@@ -190,8 +209,9 @@ Chat ingress підтримує text/STT, без передачі фото до 
 - Persistence: local SQLite tables `conversation_turns`, `memory_facts`,
   `memory_embeddings`, `knowledge_upload_sessions`, `reminders`,
   `reminder_management_sessions`, `schema_version`.
-- Background processing: per-request `asyncio.create_task()`, startup reminder
-  recovery, long-lived HA calendar listener і one nearest Windows wake task.
+- Background processing: tracked per-request tasks, startup reminder recovery,
+  long-lived HA calendar listener і one nearest Windows wake task. Shutdown
+  скасовує/очікує tracked tasks; unexpected failures логуються.
 
 ## 7. Зовнішні залежності
 
@@ -295,7 +315,7 @@ Lint, type-check і Docker commands у репозиторії не визнач�
   `_execute_knowledge()`.
 - Deployed process може працювати зі старішим artifact; перевірити port,
   OpenAPI та rebuild/restart. Статус live verification — TBD.
-- `run.bat` містить PowerShell assignment у batch-файлі; canonical launch
+- `run.bat` використовує checkout-relative Python launcher із Settings host/port; canonical deployment
   потребує рішення власника.
 - Import `src/lumen/main.py` виконує `Database.init()`; test discovery без
   окремого DB path може торкнутися operational DB.
@@ -314,7 +334,7 @@ Lint, type-check і Docker commands у репозиторії не визнач�
 5. connector audio/video STT;
 6. approved Telegram source lookup;
 7. dialogue, facts, knowledge та Ollama-compatible endpoints;
-8. окремий reviewed cleanup legacy residue;
+8. перевірити наступну збірку після source cleanup legacy execution residue;
 9. рішення щодо partial HA/knowledge context handlers;
 10. усунення test-client compatibility warning.
 
@@ -342,5 +362,5 @@ Lint, type-check і Docker commands у репозиторії не визнач�
 - Чи потрібен generic HA state read?
 - Чи потрібен explicit contract-requested knowledge lookup на додачу до
   automatic retrieval?
-- Коли дозволений cleanup legacy models/store API/data?
+- Чи потрібне подальше спрощення compatibility naming у `memory.py`?
 - Які очікувані history volume, retention та performance targets?

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 import json
 import asyncio
@@ -11,11 +12,13 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-import lumen.main as main
+from tests.runtime_test_support import main
 from lumen.models import ChatResult
 from lumen.config import Settings
+from lumen.memory.store import MemoryStore
 from lumen.models import HomeAssistantCallbackPayload
 from lumen.services.delivery import DeliveryService
+from lumen.storage.db import Database
 
 
 class FakeChatService:
@@ -46,14 +49,16 @@ class OllamaCompatibleApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.original = main.chat_service
         main.chat_service = FakeChatService()
-        self.client = TestClient(main.app)
+        self.client = TestClient(main.app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000))
 
     def tearDown(self) -> None:
         main.chat_service = self.original
 
     def test_health_and_memory_manager_exist(self) -> None:
         self.assertEqual(200, self.client.get("/").status_code)
-        self.assertIn("Lumen memory", self.client.get("/memory").text)
+        response = self.client.get("/memory")
+        self.assertEqual(200, response.status_code)
+        self.assertIn("Пам’ять Lumen", response.text)
 
     def test_ollama_chat_uses_chat_pipeline(self) -> None:
         response = self.client.post("/api/chat", json={"model": "lumen", "stream": False, "messages": [{"role": "user", "content": "Hello"}]})
@@ -85,6 +90,42 @@ class OllamaCompatibleApiTests(unittest.TestCase):
         response = self.client.post("/memory/debug-search", json={"text": "find this", "user_id": "VST"})
         self.assertEqual(200, response.status_code)
         self.assertEqual("answer:find this", response.json()["answer"])
+
+    def test_memory_defaults_follow_configured_user(self) -> None:
+        with patch.object(main, "settings", Settings(lumen_user_id="  alternate-user  ")):
+            with patch.object(main.memory_store, "list_facts", return_value=[]) as list_facts:
+                response = self.client.get("/memory/items", params={"item_type": "facts"})
+            self.assertEqual(200, response.status_code)
+            list_facts.assert_called_once_with("alternate-user", limit=100)
+
+            response = self.client.post("/memory/debug-search", json={"text": "find this"})
+            self.assertEqual("alternate-user", response.json()["context"]["user_id"])
+            self.assertNotIn("user_id:'VST'", self.client.get("/memory").text)
+
+    def test_blank_configured_user_keeps_existing_default(self) -> None:
+        self.assertEqual("VST", Settings(lumen_user_id="  ").lumen_user_id)
+
+    def test_memory_turn_delete_respects_user_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(str(Path(directory) / "memory.db"))
+            database.init()
+            store = MemoryStore(database.session)
+            turn_id = store.add_turn(user_id="owner", source="test", question="q", answer="a")
+
+            with patch.object(main, "memory_store", store):
+                response = self.client.post("/memory/delete", json={"type": "turn", "id": turn_id, "user_id": "other"})
+                self.assertEqual({"deleted": 0}, response.json())
+                self.assertEqual(1, len(store.list_turns(user_id="owner")))
+
+                response = self.client.post("/memory/delete", json={"type": "turn", "id": turn_id, "user_id": "owner"})
+                self.assertEqual({"deleted": 1}, response.json())
+                self.assertEqual([], store.list_turns(user_id="owner"))
+
+    def test_memory_delete_rejects_malformed_id(self) -> None:
+        for item_id in (None, "missing", 0, -1, 1.5, True):
+            with self.subTest(item_id=item_id):
+                response = self.client.post("/memory/delete", json={"type": "turn", "id": item_id})
+                self.assertEqual(400, response.status_code)
 
     def test_legacy_reminder_callback_is_rejected_explicitly(self) -> None:
         response = self.client.post("/connector", json={"source": "telegram", "event_type": "reminder_confirmed", "user_id": "VST", "data": {"reminder_id": "7"}})
@@ -123,15 +164,44 @@ class StartupRecoveryTests(unittest.IsolatedAsyncioTestCase):
             async def run_due(self) -> None:
                 await asyncio.sleep(0)
 
-        original = main.reminder_service
-        main.reminder_service = FakeReminderService()
-        try:
+        with patch.object(main, "reminder_service", FakeReminderService()), patch.object(main, "calendar_client", None):
             await main.start_reminder_recovery()
             task = main.app.state.reminder_recovery_task
             self.assertIsInstance(task, asyncio.Task)
             await task
-        finally:
-            main.reminder_service = original
+            await asyncio.sleep(0)
+
+    async def test_background_task_failure_is_logged_and_removed(self) -> None:
+        async def fail() -> None:
+            raise RuntimeError("test failure")
+
+        with patch.object(main.logger, "exception") as log_exception:
+            task = main._start_background_task(fail(), label="chat request=test-request")
+            await asyncio.gather(task, return_exceptions=True)
+            await asyncio.sleep(0)
+
+        self.assertNotIn(task, main.app.state.background_tasks)
+        log_exception.assert_called_once_with("Background task failed: %s", "chat request=test-request")
+
+    async def test_shutdown_cancels_chat_and_reminder_tasks(self) -> None:
+        class FakeReminderService:
+            async def run_due(self) -> None:
+                await asyncio.Event().wait()
+
+        async def wait_for_chat() -> None:
+            await asyncio.Event().wait()
+
+        with patch.object(main, "reminder_service", FakeReminderService()), patch.object(main, "calendar_client", None):
+            await main.start_reminder_recovery()
+            reminder_task = main.app.state.reminder_recovery_task
+            chat_task = main._start_background_task(wait_for_chat(), label="chat request=test-request")
+            await asyncio.sleep(0)
+            await main.stop_home_assistant_calendar()
+            await asyncio.sleep(0)
+
+        self.assertTrue(reminder_task.cancelled())
+        self.assertTrue(chat_task.cancelled())
+        self.assertFalse(main.app.state.background_tasks)
 
 
 class DeliveryLoggingTests(unittest.IsolatedAsyncioTestCase):

@@ -79,6 +79,7 @@ class ReminderService:
         missed_grace_minutes: int = 30,
         default_snooze_minutes: int = 15,
         management_session_minutes: int = 10,
+        conversation_service: object | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._delivery = delivery_service
@@ -87,6 +88,7 @@ class ReminderService:
         self._missed_grace = timedelta(minutes=max(1, int(missed_grace_minutes)))
         self._default_snooze = timedelta(minutes=max(1, int(default_snooze_minutes)))
         self._management_session_ttl = timedelta(minutes=max(1, int(management_session_minutes)))
+        self._conversation_service = conversation_service
         self._list_snapshots: dict[str, tuple[tuple[int, str, str], ...]] = {}
 
     def intercept_contract(
@@ -201,6 +203,7 @@ class ReminderService:
     async def run_due(self, *, now: datetime | None = None) -> int:
         current = self._now(now)
         self._recover_interrupted(current)
+        await self._record_awaiting_histories()
         self._expire_confirmations(current)
         rows = self._claim_due(current)
         for row in rows:
@@ -273,6 +276,39 @@ class ReminderService:
         with self._session_factory() as connection:
             connection.execute("UPDATE reminders SET status='awaiting_confirmation', delivery_lease_until=NULL, next_attempt_at=NULL, confirmation_deadline_at=?, updated_at=? WHERE id=? AND status='delivering' AND delivery_id=?", ((now + CONFIRMATION_TIMEOUT).isoformat(), now.isoformat(), row["id"], delivery_id))
             connection.commit()
+        await self._record_reminder_history(row, delivery_id)
+
+    async def _record_awaiting_histories(self) -> None:
+        """Retry history writes for delivered reminders without redelivering them."""
+        if self._conversation_service is None:
+            return
+        with self._session_factory() as connection:
+            rows = connection.execute(
+                "SELECT * FROM reminders WHERE status='awaiting_confirmation' AND delivery_id IS NOT NULL ORDER BY id"
+            ).fetchall()
+        for row in rows:
+            await self._record_reminder_history(row, str(row["delivery_id"]))
+
+    async def _record_reminder_history(self, row: object, delivery_id: str) -> None:
+        if self._conversation_service is None:
+            return
+        delivery_route = self._delivery_route_from_row(row) or {}
+        try:
+            await self._conversation_service.record_event(
+                user_id=str(row["user_id"]),
+                role="assistant",
+                content=str(row["text"]),
+                question="",
+                source="reminder",
+                kind="reminder_notification",
+                event_id=f"reminder:{delivery_id}",
+                metadata={"reminder_id": int(row["id"]), "delivery_id": delivery_id, **delivery_route},
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "Reminder history recording failed id=%s delivery_id=%s error_type=%s",
+                row["id"], delivery_id, type(exc).__name__,
+            )
 
     def _schedule_delivery_retry(
         self,

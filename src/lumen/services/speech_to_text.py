@@ -34,12 +34,21 @@ class SpeechToTextService:
     async def transcribe_url(self, *, file_url: str, file_name: str, mime_type: str) -> str:
         if not file_url.strip():
             raise SpeechToTextError("Speech attachment download URL is missing.")
-        headers: dict[str, str] = {}
-        if self._settings.home_assistant_token.strip() and file_url.startswith(self._settings.home_assistant_url.rstrip("/")):
-            headers["Authorization"] = f"Bearer {self._settings.home_assistant_token.strip()}"
-        async with httpx.AsyncClient(timeout=self._settings.ollama_timeout_seconds) as client:
-            response = await client.get(file_url, headers=headers)
-        response.raise_for_status()
+        try:
+            url = httpx.URL(file_url)
+            trusted = httpx.URL(self._settings.home_assistant_url)
+            if url.scheme not in {"http", "https"} or not url.host or url.userinfo:
+                raise SpeechToTextError("Invalid speech attachment URL.")
+            headers: dict[str, str] = {}
+            # Compare parsed origins: a hostname prefix can belong to another server.
+            if (url.scheme, url.host, url.port) == (trusted.scheme, trusted.host, trusted.port) and self._settings.home_assistant_token.strip():
+                headers["Authorization"] = f"Bearer {self._settings.home_assistant_token.strip()}"
+            async with httpx.AsyncClient(timeout=self._settings.ollama_timeout_seconds, follow_redirects=False) as client:
+                response = await client.get(file_url, headers=headers)
+            response.raise_for_status()
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
+            # Do not expose an attachment URL or credentials through endpoint logs.
+            raise SpeechToTextError(f"Speech attachment download failed ({type(exc).__name__}).") from exc
         return await self.transcribe_bytes(raw=response.content, file_name=file_name, mime_type=mime_type)
 
     async def transcribe_bytes(self, *, raw: bytes, file_name: str, mime_type: str) -> str:

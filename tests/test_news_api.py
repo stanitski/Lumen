@@ -4,7 +4,7 @@ import unittest
 
 from fastapi.testclient import TestClient
 
-import lumen.main as main
+from tests.runtime_test_support import main
 from lumen.models import NewsProcessingResult
 from lumen.services.news_processing import NewsProcessingBusyError
 

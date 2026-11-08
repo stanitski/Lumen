@@ -1,4 +1,4 @@
-"""SQLite-backed persistence layer for turns, facts, embeddings, and reminders."""
+"""SQLite-backed persistence layer for turns, facts, and embeddings."""
 
 from __future__ import annotations
 
@@ -6,563 +6,25 @@ import json
 import math
 from datetime import datetime, timedelta
 
-from lumen.time_utils import local_now_iso
-
+from lumen.memory.fact_policy import (
+    FACT_EMBEDDING_SOURCE_PREFIX,
+    FACT_EMBEDDING_SOURCE_TYPE,
+    MANDATORY_TAG,
+    fact_embedding_text,
+    fact_revision,
+    is_mandatory_fact,
+)
 from lumen.models import (
     ConversationTurnRecord,
     EmbeddingHit,
-    HomeAssistantEntityRecord,
-    IntentRecord,
     KnowledgeUploadSessionRecord,
-    ReminderRecord,
-    SkillRecord,
-    TaskRecord,
-    TaskRunRecord,
 )
+from lumen.time_utils import local_now_iso
 
 
 class MemoryStore:
     def __init__(self, session_factory) -> None:
         self._session_factory = session_factory
-
-    @staticmethod
-    def _legacy_reminders_disabled() -> None:
-        raise RuntimeError("Legacy MemoryStore reminder APIs are disabled; use ReminderService.")
-
-    def upsert_intent(self, intent: IntentRecord) -> None:
-        with self._session_factory() as connection:
-            connection.execute(
-                """
-                INSERT INTO intents(
-                    intent_id, kind, enabled, description, is_default, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(intent_id) DO UPDATE SET
-                    kind = excluded.kind,
-                    enabled = excluded.enabled,
-                    description = excluded.description,
-                    is_default = excluded.is_default,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    intent.intent_id,
-                    intent.kind,
-                    int(intent.enabled),
-                    intent.description,
-                    int(intent.is_default),
-                    intent.created_at,
-                    intent.updated_at,
-                ),
-            )
-            connection.commit()
-
-    def list_intents(self, *, kind: str | None = None, enabled_only: bool = True) -> list[IntentRecord]:
-        sql = """
-            SELECT intent_id, kind, enabled, description, is_default, created_at, updated_at
-            FROM intents
-            WHERE 1 = 1
-        """
-        params: list[object] = []
-        if kind:
-            sql += " AND kind = ?"
-            params.append(kind.strip())
-        if enabled_only:
-            sql += " AND enabled = 1"
-        sql += " ORDER BY kind ASC, is_default DESC, intent_id ASC"
-        with self._session_factory() as connection:
-            rows = connection.execute(sql, params).fetchall()
-        return [self._row_to_intent(row) for row in rows]
-
-    def default_intent(self, *, kind: str) -> IntentRecord | None:
-        with self._session_factory() as connection:
-            row = connection.execute(
-                """
-                SELECT intent_id, kind, enabled, description, is_default, created_at, updated_at
-                FROM intents
-                WHERE kind = ? AND enabled = 1
-                ORDER BY is_default DESC, intent_id ASC
-                LIMIT 1
-                """,
-                (kind.strip(),),
-            ).fetchone()
-        return self._row_to_intent(row) if row else None
-
-    def upsert_skill(self, skill: SkillRecord) -> None:
-        with self._session_factory() as connection:
-            connection.execute(
-                """
-                INSERT INTO skills(
-                    skill_id, intent_id, scope, owner_user_id, enabled, priority, description, tags_json,
-                    variables_schema_json, steps_json, embedding_json, content_hash, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(skill_id) DO UPDATE SET
-                    intent_id = excluded.intent_id,
-                    scope = excluded.scope,
-                    owner_user_id = excluded.owner_user_id,
-                    enabled = excluded.enabled,
-                    priority = excluded.priority,
-                    description = excluded.description,
-                    tags_json = excluded.tags_json,
-                    variables_schema_json = excluded.variables_schema_json,
-                    steps_json = excluded.steps_json,
-                    embedding_json = excluded.embedding_json,
-                    content_hash = excluded.content_hash,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    skill.skill_id,
-                    skill.intent_id,
-                    skill.scope,
-                    skill.owner_user_id,
-                    int(skill.enabled),
-                    int(skill.priority),
-                    skill.description,
-                    json.dumps(skill.tags, ensure_ascii=False),
-                    json.dumps(skill.variables_schema, ensure_ascii=False),
-                    json.dumps(skill.steps, ensure_ascii=False),
-                    json.dumps([float(value) for value in skill.embedding], ensure_ascii=False),
-                    skill.content_hash,
-                    skill.created_at,
-                    skill.updated_at,
-                ),
-            )
-            connection.commit()
-
-    def get_skill(self, skill_id: str) -> SkillRecord | None:
-        with self._session_factory() as connection:
-            row = connection.execute(
-                """
-                SELECT skill_id, intent_id, scope, owner_user_id, enabled, priority, description, tags_json,
-                       variables_schema_json, steps_json, embedding_json, content_hash, created_at, updated_at
-                FROM skills
-                WHERE skill_id = ?
-                """,
-                (skill_id.strip(),),
-            ).fetchone()
-        return self._row_to_skill(row) if row else None
-
-    def set_skill_enabled(self, skill_id: str, *, enabled: bool) -> bool:
-        with self._session_factory() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE skills
-                SET enabled = ?, updated_at = ?
-                WHERE skill_id = ?
-                """,
-                (int(enabled), local_now_iso(), skill_id.strip()),
-            )
-            connection.commit()
-            return int(cursor.rowcount) > 0
-
-    def list_skills(
-        self,
-        *,
-        scope: str | None = None,
-        owner_user_id: str | None = None,
-        enabled_only: bool = True,
-        limit: int = 500,
-    ) -> list[SkillRecord]:
-        safe_limit = max(1, min(limit, 5000))
-        sql = """
-            SELECT skill_id, intent_id, scope, owner_user_id, enabled, priority, description, tags_json,
-                   variables_schema_json, steps_json, embedding_json, content_hash, created_at, updated_at
-            FROM skills
-            WHERE 1 = 1
-        """
-        params: list[object] = []
-        if scope:
-            sql += " AND scope = ?"
-            params.append(scope.strip())
-        if owner_user_id is not None:
-            sql += " AND owner_user_id = ?"
-            params.append(owner_user_id.strip())
-        if enabled_only:
-            sql += " AND enabled = 1"
-        sql += " ORDER BY priority DESC, skill_id ASC LIMIT ?"
-        params.append(safe_limit)
-        with self._session_factory() as connection:
-            rows = connection.execute(sql, params).fetchall()
-        return [self._row_to_skill(row) for row in rows]
-
-    def update_skill_embedding(
-        self,
-        *,
-        skill_id: str,
-        embedding: list[float],
-        content_hash: str,
-        updated_at: str | None = None,
-    ) -> bool:
-        now = updated_at or local_now_iso()
-        with self._session_factory() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE skills
-                SET embedding_json = ?, content_hash = ?, updated_at = ?
-                WHERE skill_id = ?
-                """,
-                (
-                    json.dumps([float(value) for value in embedding], ensure_ascii=False),
-                    content_hash,
-                    now,
-                    skill_id.strip(),
-                ),
-            )
-            connection.commit()
-            return int(cursor.rowcount) > 0
-
-    def search_skills_by_embedding(
-        self,
-        query_embedding: list[float],
-        limit: int | None = 5,
-    ) -> list[dict[str, object]]:
-        if not query_embedding:
-            return []
-        safe_limit = max(1, min(limit, 100))
-        with self._session_factory() as connection:
-            rows = connection.execute(
-                """
-                SELECT skill_id, embedding_json, priority
-                FROM skills
-                WHERE enabled = 1
-                  AND embedding_json IS NOT NULL
-                  AND embedding_json != '[]'
-                """,
-            ).fetchall()
-
-        scored: list[dict[str, object]] = []
-        for row in rows:
-            stored_embedding = self._load_embedding_vector(row["embedding_json"])
-            if not stored_embedding:
-                continue
-            similarity = self._cosine_similarity(query_embedding, stored_embedding)
-            scored.append(
-                {
-                    "skill_id": row["skill_id"],
-                    "similarity": similarity,
-                    "priority": int(row["priority"]),
-                }
-            )
-        scored.sort(key=lambda item: (float(item["similarity"]), int(item["priority"])), reverse=True)
-        return scored[:safe_limit]
-
-    def create_task(
-        self,
-        *,
-        user_id: str,
-        source_ref: str,
-        skill_id: str | None = None,
-        task_group_id: str | None = None,
-        parent_task_id: int | None = None,
-        status: str = "pending",
-        execution_mode: str = "immediate",
-        due_at: str | None = None,
-        repeat_policy: str | None = None,
-        repeat_interval_seconds: int | None = None,
-        repeat_count: int | None = None,
-        repeat_until: str | None = None,
-        priority: int = 50,
-        payload: dict[str, object] | None = None,
-        steps: list[dict[str, object]] | None = None,
-        response_policy: str | None = None,
-        requires_confirmation: bool = False,
-        created_at: str | None = None,
-    ) -> int:
-        now = created_at or local_now_iso()
-        with self._session_factory() as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO tasks(
-                    user_id, source_ref, skill_id, task_group_id, parent_task_id, status, execution_mode, due_at,
-                    repeat_policy, repeat_interval_seconds, repeat_count, repeat_until, run_count, priority,
-                    payload_json, steps_json, requires_confirmation, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    user_id,
-                    source_ref,
-                    skill_id,
-                    task_group_id,
-                    parent_task_id,
-                    status,
-                    execution_mode,
-                    due_at,
-                    repeat_policy,
-                    repeat_interval_seconds,
-                    repeat_count,
-                    repeat_until,
-                    0,
-                    int(priority),
-                    json.dumps(payload or {}, ensure_ascii=False),
-                    json.dumps(steps or [], ensure_ascii=False),
-                    int(requires_confirmation),
-                    now,
-                    now,
-                ),
-            )
-            connection.commit()
-            return int(cursor.lastrowid)
-
-    def get_task(self, task_id: int) -> TaskRecord | None:
-        with self._session_factory() as connection:
-            row = connection.execute(
-                """
-                SELECT id, user_id, source_ref, skill_id, task_group_id, parent_task_id, status, execution_mode, due_at,
-                       repeat_policy, repeat_interval_seconds, repeat_count, repeat_until, run_count, priority,
-                       payload_json, steps_json, requires_confirmation, created_at, updated_at,
-                       completed_at, cancelled_at, last_error
-                FROM tasks
-                WHERE id = ?
-                """,
-                (int(task_id),),
-            ).fetchone()
-        return self._row_to_task(row) if row else None
-
-    def list_due_tasks(self, *, now_iso: str, limit: int = 100) -> list[TaskRecord]:
-        safe_limit = max(1, min(limit, 500))
-        with self._session_factory() as connection:
-            rows = connection.execute(
-                """
-                SELECT id, user_id, source_ref, skill_id, task_group_id, parent_task_id, status, execution_mode, due_at,
-                       repeat_policy, repeat_interval_seconds, repeat_count, repeat_until, run_count, priority,
-                       payload_json, steps_json, requires_confirmation, created_at, updated_at,
-                       completed_at, cancelled_at, last_error
-                FROM tasks
-                WHERE status = 'pending'
-                  AND (execution_mode = 'immediate' OR due_at IS NULL OR due_at <= ?)
-                ORDER BY priority DESC, due_at ASC, id ASC
-                LIMIT ?
-                """,
-                (now_iso, safe_limit),
-            ).fetchall()
-        return [self._row_to_task(row) for row in rows]
-
-    def list_tasks(
-        self,
-        *,
-        user_id: str,
-        statuses: list[str] | None = None,
-        skill_id: str | None = None,
-        limit: int = 100,
-    ) -> list[TaskRecord]:
-        safe_limit = max(1, min(limit, 500))
-        clauses = ["user_id = ?"]
-        params: list[object] = [user_id]
-        normalized_statuses = [status.strip() for status in (statuses or []) if status.strip()]
-        if normalized_statuses:
-            placeholders = ", ".join("?" for _ in normalized_statuses)
-            clauses.append(f"status IN ({placeholders})")
-            params.extend(normalized_statuses)
-        if skill_id:
-            clauses.append("skill_id = ?")
-            params.append(skill_id.strip())
-        params.append(safe_limit)
-        with self._session_factory() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT id, user_id, source_ref, skill_id, task_group_id, parent_task_id, status, execution_mode, due_at,
-                       repeat_policy, repeat_interval_seconds, repeat_count, repeat_until, run_count, priority,
-                       payload_json, steps_json, requires_confirmation, created_at, updated_at,
-                       completed_at, cancelled_at, last_error
-                FROM tasks
-                WHERE {' AND '.join(clauses)}
-                ORDER BY due_at ASC, id ASC
-                LIMIT ?
-                """,
-                params,
-            ).fetchall()
-        return [self._row_to_task(row) for row in rows]
-
-    def latest_awaiting_input_task(self, *, user_id: str) -> TaskRecord | None:
-        with self._session_factory() as connection:
-            row = connection.execute(
-                """
-                SELECT id, user_id, source_ref, skill_id, task_group_id, parent_task_id, status, execution_mode, due_at,
-                       repeat_policy, repeat_interval_seconds, repeat_count, repeat_until, run_count, priority,
-                       payload_json, steps_json, requires_confirmation, created_at, updated_at,
-                       completed_at, cancelled_at, last_error
-                FROM tasks
-                WHERE user_id = ? AND status = 'awaiting_input'
-                ORDER BY id DESC
-                LIMIT 1
-                """,
-                (user_id,),
-            ).fetchone()
-        return self._row_to_task(row) if row else None
-
-    def create_task_run(
-        self,
-        *,
-        task_id: int,
-        task_group_id: str | None = None,
-        status: str = "queued",
-        started_at: str | None = None,
-        result: dict[str, object] | None = None,
-        error_text: str = "",
-        cancelled_by_task_id: int | None = None,
-    ) -> int:
-        with self._session_factory() as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO task_runs(
-                    task_id, task_group_id, status, started_at, finished_at, result_json, error_text,
-                    cancelled_by_task_id
-                )
-                VALUES (?, ?, ?, ?, NULL, ?, ?, ?)
-                """,
-                (
-                    int(task_id),
-                    task_group_id,
-                    status,
-                    started_at,
-                    json.dumps(result or {}, ensure_ascii=False),
-                    error_text,
-                    cancelled_by_task_id,
-                ),
-            )
-            connection.commit()
-            return int(cursor.lastrowid)
-
-    def finish_task_run(
-        self,
-        run_id: int,
-        *,
-        status: str,
-        result: dict[str, object] | None = None,
-        error_text: str = "",
-        finished_at: str | None = None,
-    ) -> None:
-        now = finished_at or local_now_iso()
-        with self._session_factory() as connection:
-            connection.execute(
-                """
-                UPDATE task_runs
-                SET status = ?, finished_at = ?, result_json = ?, error_text = ?
-                WHERE id = ?
-                """,
-                (
-                    status,
-                    now,
-                    json.dumps(result or {}, ensure_ascii=False),
-                    error_text,
-                    int(run_id),
-                ),
-            )
-            connection.commit()
-
-    def update_task_status(
-        self,
-        task_id: int,
-        *,
-        status: str,
-        completed_at: str | None = None,
-        cancelled_at: str | None = None,
-        last_error: str = "",
-    ) -> None:
-        now = local_now_iso()
-        with self._session_factory() as connection:
-            connection.execute(
-                """
-                UPDATE tasks
-                SET status = ?, updated_at = ?, completed_at = COALESCE(?, completed_at),
-                    cancelled_at = COALESCE(?, cancelled_at), last_error = ?
-                WHERE id = ?
-                """,
-                (
-                    status,
-                    now,
-                    completed_at,
-                    cancelled_at,
-                    last_error,
-                    int(task_id),
-                ),
-            )
-            connection.commit()
-
-    def mark_task_active(self, task_id: int) -> None:
-        now = local_now_iso()
-        with self._session_factory() as connection:
-            connection.execute(
-                """
-                UPDATE tasks
-                SET status = 'active', updated_at = ?
-                WHERE id = ?
-                """,
-                (now, int(task_id)),
-            )
-            connection.commit()
-
-    def finish_task_after_run(
-        self,
-        task_id: int,
-        *,
-        status: str,
-        next_due_at: str | None = None,
-        last_error: str = "",
-    ) -> None:
-        now = local_now_iso()
-        completed_at = now if status == "completed" else None
-        cancelled_at = now if status == "cancelled" else None
-        with self._session_factory() as connection:
-            connection.execute(
-                """
-                UPDATE tasks
-                SET status = ?, due_at = ?, run_count = run_count + 1, updated_at = ?,
-                    completed_at = COALESCE(?, completed_at),
-                    cancelled_at = COALESCE(?, cancelled_at),
-                    last_error = ?
-                WHERE id = ?
-                """,
-                (
-                    status,
-                    next_due_at,
-                    now,
-                    completed_at,
-                    cancelled_at,
-                    last_error,
-                    int(task_id),
-                ),
-            )
-            connection.commit()
-
-    def cancel_tasks(
-        self,
-        *,
-        task_id: int | None = None,
-        task_group_id: str | None = None,
-        skill_id: str | None = None,
-        user_id: str | None = None,
-    ) -> int:
-        clauses = ["status IN ('pending', 'active')"]
-        params: list[object] = []
-        if task_id is not None:
-            clauses.append("id = ?")
-            params.append(int(task_id))
-        if task_group_id:
-            clauses.append("task_group_id = ?")
-            params.append(task_group_id)
-        if skill_id:
-            clauses.append("skill_id = ?")
-            params.append(skill_id)
-        if user_id:
-            clauses.append("user_id = ?")
-            params.append(user_id)
-        if len(clauses) == 1:
-            return 0
-
-        now = local_now_iso()
-        with self._session_factory() as connection:
-            cursor = connection.execute(
-                f"""
-                UPDATE tasks
-                SET status = 'cancelled', cancelled_at = ?, updated_at = ?
-                WHERE {' AND '.join(clauses)}
-                """,
-                [now, now, *params],
-            )
-            connection.commit()
-            return int(cursor.rowcount)
 
     def add_embedding(
         self,
@@ -638,6 +100,43 @@ class MemoryStore:
             connection.commit()
             return int(cursor.lastrowid)
 
+    def replace_embeddings(
+        self,
+        *,
+        user_id: str,
+        source_type: str,
+        source_ref: str,
+        chunks: list[tuple[str, list[float], dict[str, object]]],
+        importance: int = 5,
+    ) -> int:
+        """Replace one document atomically; serialize all chunks before deletion."""
+        created_at = local_now_iso()
+        rows = [
+            (
+                user_id, source_type, source_ref, index, content,
+                json.dumps(vector, ensure_ascii=False, allow_nan=False),
+                importance, created_at,
+                json.dumps(metadata, ensure_ascii=False, allow_nan=False),
+            )
+            for index, (content, vector, metadata) in enumerate(chunks)
+        ]
+        with self._session_factory() as connection:
+            with connection:
+                connection.execute(
+                    "DELETE FROM memory_embeddings WHERE user_id = ? AND source_type = ? AND source_ref = ?",
+                    (user_id, source_type, source_ref),
+                )
+                connection.executemany(
+                    """
+                    INSERT INTO memory_embeddings(
+                        user_id, source_type, source_ref, chunk_index, content,
+                        embedding_json, importance, created_at, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+        return len(rows)
+
     def delete_embeddings(self, *, user_id: str, source_ref: str, source_type: str | None = None) -> int:
         with self._session_factory() as connection:
             if source_type:
@@ -702,11 +201,11 @@ class MemoryStore:
         self,
         *,
         user_id: str,
-        limit: int = 100,
+        limit: int | None = 100,
         source_types: list[str] | None = None,
         source_ref_prefixes: list[str] | None = None,
     ) -> list[EmbeddingHit]:
-        safe_limit = max(1, min(int(limit), 1000))
+        safe_limit = max(1, min(int(limit), 1000)) if limit is not None else None
         sql = """
             SELECT id, user_id, source_type, source_ref, chunk_index, content, importance, created_at, metadata_json, embedding_json, expires_at
             FROM memory_embeddings
@@ -722,8 +221,10 @@ class MemoryStore:
             params=params,
             source_ref_prefixes=source_ref_prefixes,
         )
-        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
-        params.append(safe_limit)
+        sql += " ORDER BY created_at DESC, id DESC"
+        if safe_limit is not None:
+            sql += " LIMIT ?"
+            params.append(safe_limit)
         with self._session_factory() as connection:
             rows = connection.execute(sql, params).fetchall()
         return [
@@ -746,6 +247,16 @@ class MemoryStore:
     def purge_expired_memory(self, *, now_iso: str | None = None) -> dict[str, int]:
         cutoff = now_iso or local_now_iso()
         with self._session_factory() as connection:
+            expired_fact_rows = connection.execute(
+                """
+                SELECT id, user_id
+                FROM memory_facts
+                WHERE expires_at IS NOT NULL AND expires_at <= ?
+                """,
+                (cutoff,),
+            ).fetchall()
+            for row in expired_fact_rows:
+                self._delete_fact_embedding(connection, user_id=row["user_id"], fact_id=int(row["id"]))
             facts_cursor = connection.execute(
                 """
                 DELETE FROM memory_facts
@@ -805,6 +316,140 @@ class MemoryStore:
             )
             connection.commit()
             return int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+    def add_turn_once(
+        self,
+        *,
+        user_id: str,
+        event_id: str,
+        source: str,
+        question: str,
+        answer: str,
+        question_created_at: str | None = None,
+        answer_created_at: str | None = None,
+        created_at: str | None = None,
+        memory_processed: int = 0,
+        turn_meta: dict[str, object] | None = None,
+    ) -> int:
+        """Insert an event once, using turn metadata so the schema stays compatible."""
+        normalized_event_id = str(event_id).strip()
+        if not normalized_event_id:
+            raise ValueError("event_id must not be empty")
+        question_created_at = question_created_at or local_now_iso()
+        answer_created_at = answer_created_at or question_created_at
+        created_at = created_at or answer_created_at
+        metadata = dict(turn_meta or {})
+        metadata["event_id"] = normalized_event_id
+        with self._session_factory() as connection:
+            # Serialize the lookup and insert across writers. Existing rows from
+            # old deployments are still found by reading their JSON metadata.
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """
+                SELECT id FROM conversation_turns
+                WHERE user_id = ? AND json_extract(turn_meta_json, '$.event_id') = ?
+                LIMIT 1
+                """,
+                (user_id, normalized_event_id),
+            ).fetchone()
+            if existing:
+                connection.commit()
+                return int(existing["id"])
+            cursor = connection.execute(
+                """
+                INSERT INTO conversation_turns(
+                    user_id, source, question, answer, question_created_at,
+                    answer_created_at, created_at, memory_processed, turn_meta_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, source, question, answer, question_created_at, answer_created_at,
+                 created_at, memory_processed, self._dump_json_object(metadata)),
+            )
+            connection.commit()
+            return int(cursor.lastrowid)
+
+    def find_turn_by_event_id(self, *, user_id: str, event_id: str) -> ConversationTurnRecord | None:
+        normalized_event_id = str(event_id).strip()
+        if not normalized_event_id:
+            return None
+        with self._session_factory() as connection:
+            row = connection.execute(
+                """
+                SELECT id, user_id, source, question, answer, question_created_at,
+                       answer_created_at, created_at, memory_processed, turn_meta_json
+                FROM conversation_turns
+                WHERE user_id = ? AND json_extract(turn_meta_json, '$.event_id') = ?
+                ORDER BY id DESC LIMIT 1
+                """,
+                (user_id, normalized_event_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return ConversationTurnRecord(
+            id=int(row["id"]), user_id=row["user_id"], source=row["source"],
+            question=row["question"], answer=row["answer"],
+            question_created_at=row["question_created_at"],
+            answer_created_at=row["answer_created_at"], created_at=row["created_at"],
+            memory_processed=int(row["memory_processed"]),
+            turn_meta=self._load_json_object(row["turn_meta_json"]),
+        )
+
+    def update_turn_metadata(self, *, user_id: str, turn_id: int, updates: dict[str, object]) -> bool:
+        with self._session_factory() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT turn_meta_json FROM conversation_turns WHERE user_id = ? AND id = ?",
+                (user_id, int(turn_id)),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return False
+            metadata = self._load_json_object(row["turn_meta_json"])
+            metadata.update(updates)
+            cursor = connection.execute(
+                "UPDATE conversation_turns SET turn_meta_json = ? WHERE user_id = ? AND id = ?",
+                (self._dump_json_object(metadata), user_id, int(turn_id)),
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
+    def update_turn_result(
+        self,
+        *,
+        user_id: str,
+        turn_id: int,
+        question: str,
+        answer: str,
+        updates: dict[str, object],
+    ) -> bool:
+        """Replace one persisted event result without changing its event identity."""
+        now = local_now_iso()
+        with self._session_factory() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT turn_meta_json FROM conversation_turns WHERE user_id = ? AND id = ?",
+                (user_id, int(turn_id)),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return False
+            previous = self._load_json_object(row["turn_meta_json"])
+            metadata = dict(updates)
+            if not metadata.get("event_id") and previous.get("event_id"):
+                metadata["event_id"] = previous["event_id"]
+            cursor = connection.execute(
+                """
+                UPDATE conversation_turns
+                SET question = ?, answer = ?, answer_created_at = ?, created_at = ?,
+                    memory_processed = 0, turn_meta_json = ?, primary_topic = '',
+                    primary_topic_embedding_json = '[]', question_embedding_json = '[]',
+                    answer_embedding_json = '[]'
+                WHERE user_id = ? AND id = ?
+                """,
+                (question, answer, now, now, self._dump_json_object(metadata), user_id, int(turn_id)),
+            )
+            connection.commit()
+        return cursor.rowcount > 0
 
     def mark_turn_memory_processed(self, *, user_id: str, turn_id: int) -> bool:
         with self._session_factory() as connection:
@@ -1033,27 +678,66 @@ class MemoryStore:
         source_ref: str,
         tags: list[str] | None = None,
         expires_at: datetime | None = None,
+        inclusion: str | None = None,
+        fact_id: int | None = None,
     ) -> int:
+        inclusion_mode = self._normalize_fact_inclusion(inclusion)
+        if fact_id is not None and (
+            isinstance(fact_id, bool) or not isinstance(fact_id, int) or fact_id <= 0
+        ):
+            raise ValueError("fact_id must be a positive integer")
         now = local_now_iso()
+        expires_at_iso = expires_at.isoformat() if expires_at else None
         with self._session_factory() as connection:
-            existing = connection.execute(
-                """
-                SELECT id, category, subject, predicate, value, confidence, importance, tags_json, source_ref, expires_at
-                FROM memory_facts
-                WHERE user_id = ? AND category = ? AND subject = ? AND predicate = ?
-                ORDER BY importance DESC, last_seen DESC, id DESC
-                LIMIT 1
-                """,
-                (user_id, category, subject, predicate),
-            ).fetchone()
+            if fact_id is not None:
+                existing = connection.execute(
+                    """
+                    SELECT id, user_id, category, subject, predicate, value, confidence, importance,
+                           source_ref, last_seen, expires_at, tags_json
+                    FROM memory_facts
+                    WHERE user_id = ? AND id = ?
+                    """,
+                    (user_id, int(fact_id)),
+                ).fetchone()
+                if existing is None:
+                    raise ValueError(f"Fact {int(fact_id)} does not exist for user {user_id!r}")
+                if (existing["category"], existing["subject"], existing["predicate"]) != (
+                    category,
+                    subject,
+                    predicate,
+                ):
+                    raise ValueError("fact_id target does not match category, subject, and predicate")
+            else:
+                existing = connection.execute(
+                    """
+                    SELECT id, user_id, category, subject, predicate, value, confidence, importance,
+                           source_ref, last_seen, expires_at, tags_json
+                    FROM memory_facts
+                    WHERE user_id = ? AND category = ? AND subject = ? AND predicate = ?
+                    ORDER BY importance DESC, last_seen DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (user_id, category, subject, predicate),
+                ).fetchone()
             if existing:
-                merged_tags = sorted(set(json.loads(existing["tags_json"] or "[]") + (tags or [])))
+                merged_tags = sorted(set(self._load_fact_tags(existing["tags_json"]) + self._normalize_fact_tags(tags)))
+                merged_tags = self._apply_fact_inclusion(merged_tags, inclusion_mode)
                 next_value = value if value and value != existing["value"] else existing["value"]
+                old_fact = self._row_to_fact_dict(existing)
+                next_fact = {
+                    **old_fact,
+                    "category": category,
+                    "subject": subject,
+                    "predicate": predicate,
+                    "value": next_value,
+                    "expires_at": expires_at_iso,
+                    "tags": merged_tags,
+                }
                 connection.execute(
                     """
-                UPDATE memory_facts
-                SET value = ?, confidence = ?, importance = ?, last_seen = ?, tags_json = ?, expires_at = ?, source_ref = ?
-                WHERE id = ?
+                    UPDATE memory_facts
+                    SET value = ?, confidence = ?, importance = ?, last_seen = ?, tags_json = ?, expires_at = ?, source_ref = ?
+                    WHERE user_id = ? AND id = ?
                     """,
                     (
                         next_value,
@@ -1061,11 +745,14 @@ class MemoryStore:
                         max(existing["importance"], importance),
                         now,
                         json.dumps(merged_tags),
-                        expires_at.isoformat() if expires_at else None,
+                        expires_at_iso,
                         source_ref,
+                        user_id,
                         existing["id"],
                     ),
                 )
+                if self._fact_embedding_needs_invalidation(old_fact, next_fact):
+                    self._delete_fact_embedding(connection, user_id=user_id, fact_id=int(existing["id"]))
                 connection.commit()
                 return int(existing["id"])
 
@@ -1084,8 +771,8 @@ class MemoryStore:
                     importance,
                     source_ref,
                     now,
-                    expires_at.isoformat() if expires_at else None,
-                    json.dumps(tags or []),
+                    expires_at_iso,
+                    json.dumps(self._apply_fact_inclusion(self._normalize_fact_tags(tags), inclusion_mode)),
                 ),
             )
             connection.commit()
@@ -1119,6 +806,8 @@ class MemoryStore:
             ).fetchall()
             if rows:
                 kept_id = int(rows[0]["id"])
+                for row in rows:
+                    self._delete_fact_embedding(connection, user_id=user_id, fact_id=int(row["id"]))
                 connection.execute(
                     """
                     UPDATE memory_facts
@@ -1173,6 +862,19 @@ class MemoryStore:
     def delete_news_topic_facts(self, *, user_id: str, subject: str) -> int:
         """Remove all current and legacy preference rows for one news topic."""
         with self._session_factory() as connection:
+            rows = connection.execute(
+                """
+                SELECT id
+                FROM memory_facts
+                WHERE user_id = ?
+                  AND category = 'news_context'
+                  AND subject = ?
+                  AND predicate IN ('dislikes', 'likes')
+                """,
+                (user_id, subject),
+            ).fetchall()
+            for row in rows:
+                self._delete_fact_embedding(connection, user_id=user_id, fact_id=int(row["id"]))
             cursor = connection.execute(
                 """
                 DELETE FROM memory_facts
@@ -1185,6 +887,23 @@ class MemoryStore:
             )
             connection.commit()
             return int(cursor.rowcount)
+
+    def memory_counts(self, user_id: str) -> dict[str, int]:
+        """Count administrative memory groups without loading their contents."""
+        with self._session_factory() as connection:
+            facts = connection.execute(
+                "SELECT count(*) FROM memory_facts WHERE user_id IN (?, 'global')", (user_id,)
+            ).fetchone()[0]
+            turns = connection.execute(
+                "SELECT count(*) FROM conversation_turns WHERE user_id = ?", (user_id,)
+            ).fetchone()[0]
+            knowledge = connection.execute(
+                """SELECT count(*) FROM memory_embeddings
+                   WHERE user_id IN (?, 'global')
+                     AND source_type IN ('knowledge_text_personal', 'knowledge_text_global')""",
+                (user_id,),
+            ).fetchone()[0]
+        return {"facts": int(facts), "turns": int(turns), "knowledge": int(knowledge)}
 
     def list_facts(self, user_id: str, limit: int = 100, *, include_global: bool = True) -> list[dict]:
         safe_limit = max(1, min(limit, 500))
@@ -1201,6 +920,30 @@ class MemoryStore:
                 LIMIT ?
                 """,
                 (user_id, safe_limit),
+            ).fetchall()
+        return [self._row_to_fact_dict(row) for row in rows]
+
+    def list_fact_page(
+        self,
+        user_id: str,
+        *,
+        after_id: int = 0,
+        limit: int = 100,
+    ) -> list[dict]:
+        """List one user-scoped fact page using an id keyset cursor."""
+        safe_after_id = max(0, int(after_id))
+        safe_limit = max(1, min(int(limit), 1000))
+        with self._session_factory() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, user_id, category, subject, predicate, value, confidence, importance,
+                       source_ref, last_seen, expires_at, tags_json
+                FROM memory_facts
+                WHERE user_id = ? AND id > ?
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (user_id, safe_after_id, safe_limit),
             ).fetchall()
         return [self._row_to_fact_dict(row) for row in rows]
 
@@ -1230,9 +973,46 @@ class MemoryStore:
         source_ref: str,
         tags: list[str] | None = None,
         expires_at: datetime | None = None,
+        inclusion: str | None = None,
+        expected_revision: str | None = None,
     ) -> dict | None:
+        inclusion_mode = self._normalize_fact_inclusion(inclusion)
         now = local_now_iso()
+        expires_at_iso = expires_at.isoformat() if expires_at else None
         with self._session_factory() as connection:
+            if expected_revision is not None:
+                # Hold the write reservation through version check and mutation;
+                # a second writer cannot slip between those two operations.
+                connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """
+                SELECT id, user_id, category, subject, predicate, value, confidence, importance,
+                       source_ref, last_seen, expires_at, tags_json
+                FROM memory_facts
+                WHERE user_id = ? AND id = ?
+                """,
+                (user_id, int(fact_id)),
+            ).fetchone()
+            if existing is None:
+                return None
+            old_fact = self._row_to_fact_dict(existing)
+            if expected_revision is not None and fact_revision(old_fact) != expected_revision:
+                raise ValueError("Fact changed since it was loaded")
+            next_tags = self._normalize_fact_tags(tags)
+            if inclusion_mode is not None:
+                next_tags = self._apply_fact_inclusion(
+                    sorted(set(self._load_fact_tags(existing["tags_json"]) + next_tags)),
+                    inclusion_mode,
+                )
+            next_fact = {
+                **old_fact,
+                "category": category,
+                "subject": subject,
+                "predicate": predicate,
+                "value": value,
+                "expires_at": expires_at_iso,
+                "tags": next_tags,
+            }
             cursor = connection.execute(
                 """
                 UPDATE memory_facts
@@ -1248,19 +1028,37 @@ class MemoryStore:
                     importance,
                     source_ref,
                     now,
-                    expires_at.isoformat() if expires_at else None,
-                    json.dumps(tags or []),
+                    expires_at_iso,
+                    json.dumps(next_tags),
                     user_id,
                     fact_id,
                 ),
             )
-            connection.commit()
             if cursor.rowcount == 0:
+                connection.rollback()
                 return None
+            if self._fact_embedding_needs_invalidation(old_fact, next_fact):
+                self._delete_fact_embedding(connection, user_id=user_id, fact_id=int(fact_id))
+            connection.commit()
         return self.get_fact(user_id, fact_id)
 
-    def delete_fact(self, user_id: str, fact_id: int) -> bool:
+    def delete_fact(self, user_id: str, fact_id: int, *, expected_revision: str | None = None) -> bool:
         with self._session_factory() as connection:
+            if expected_revision is not None:
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(
+                    """
+                    SELECT id, user_id, category, subject, predicate, value, confidence,
+                           importance, source_ref, last_seen, expires_at, tags_json
+                    FROM memory_facts WHERE user_id = ? AND id = ?
+                    """,
+                    (user_id, int(fact_id)),
+                ).fetchone()
+                if existing is None:
+                    return False
+                if fact_revision(self._row_to_fact_dict(existing)) != expected_revision:
+                    raise ValueError("Fact changed since it was loaded")
+            self._delete_fact_embedding(connection, user_id=user_id, fact_id=int(fact_id))
             cursor = connection.execute("DELETE FROM memory_facts WHERE user_id = ? AND id = ?", (user_id, fact_id))
             connection.commit()
             return cursor.rowcount > 0
@@ -1271,6 +1069,8 @@ class MemoryStore:
             return 0
         placeholders = ", ".join("?" for _ in ids)
         with self._session_factory() as connection:
+            for fact_id in ids:
+                self._delete_fact_embedding(connection, user_id=user_id, fact_id=fact_id)
             cursor = connection.execute(
                 f"DELETE FROM memory_facts WHERE user_id = ? AND id IN ({placeholders})",
                 [user_id, *ids],
@@ -1297,238 +1097,6 @@ class MemoryStore:
                     break
         return matches
 
-    def get_device_alias_map(self, user_id: str) -> dict[str, str]:
-        with self._session_factory() as connection:
-            rows = connection.execute(
-                """
-                SELECT subject, value
-                FROM memory_facts
-                WHERE user_id = ? AND category = ? AND predicate = ?
-                ORDER BY importance DESC, last_seen DESC
-                """,
-                (user_id, "device_alias", "alias"),
-            ).fetchall()
-        alias_map: dict[str, str] = {}
-        for row in rows:
-            subject = (row["subject"] or "").strip()
-            value = (row["value"] or "").strip()
-            if subject and value and subject not in alias_map:
-                alias_map[subject] = value
-        return alias_map
-
-    def find_routine(self, *, user_id: str, query: str) -> dict[str, object] | None:
-        normalized_query = self._normalize_text(query)
-        if not normalized_query:
-            return None
-        with self._session_factory() as connection:
-            rows = connection.execute(
-                """
-                SELECT id, user_id, subject, predicate, value, confidence, importance, source_ref, last_seen, tags_json
-                FROM memory_facts
-                WHERE user_id IN (?, 'global') AND category = ?
-                ORDER BY CASE WHEN user_id = ? THEN 0 ELSE 1 END, importance DESC, last_seen DESC, id DESC
-                LIMIT 100
-                """,
-                (user_id, "routine", user_id),
-            ).fetchall()
-
-        best: dict[str, object] | None = None
-        best_score = 0.0
-        for row in rows:
-            try:
-                payload = json.loads(row["value"] or "{}")
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(payload, dict):
-                continue
-            names = self._routine_match_names(row["subject"], payload)
-            score = self._score_routine_match(normalized_query, names)
-            if score <= best_score:
-                continue
-            steps = payload.get("steps")
-            if not isinstance(steps, list):
-                continue
-            best_score = score
-            best = {
-                "id": int(row["id"]),
-                "user_id": row["user_id"],
-                "name": str(payload.get("name") or row["subject"] or "").strip(),
-                "aliases": [name for name in names if name],
-                "steps": [step for step in steps if isinstance(step, dict)],
-                "payload": payload,
-                "score": score,
-                "source_ref": row["source_ref"],
-            }
-        return best if best_score >= 1.0 else None
-
-    def list_routines(self, *, user_id: str, include_global: bool = True, limit: int = 100) -> list[dict[str, object]]:
-        safe_limit = max(1, min(limit, 500))
-        if include_global:
-            where = "user_id IN (?, 'global')"
-            params: list[object] = [user_id, "routine", user_id, safe_limit]
-            order_scope = "CASE WHEN user_id = ? THEN 0 ELSE 1 END,"
-        else:
-            where = "user_id = ?"
-            params = [user_id, "routine", safe_limit]
-            order_scope = ""
-        with self._session_factory() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT id, user_id, subject, predicate, value, confidence, importance, source_ref, last_seen, tags_json
-                FROM memory_facts
-                WHERE {where} AND category = ?
-                ORDER BY {order_scope} importance DESC, last_seen DESC, id DESC
-                LIMIT ?
-                """,
-                params,
-            ).fetchall()
-
-        routines: list[dict[str, object]] = []
-        for row in rows:
-            try:
-                payload = json.loads(row["value"] or "{}")
-            except json.JSONDecodeError:
-                payload = {}
-            if not isinstance(payload, dict):
-                payload = {}
-            routines.append(
-                {
-                    "id": int(row["id"]),
-                    "user_id": row["user_id"],
-                    "subject": row["subject"],
-                    "predicate": row["predicate"],
-                    "name": str(payload.get("name") or row["subject"] or "").strip(),
-                    "aliases": self._routine_match_names(row["subject"], payload),
-                    "steps": payload.get("steps") if isinstance(payload.get("steps"), list) else [],
-                    "payload": payload,
-                    "source_ref": row["source_ref"],
-                    "last_seen": row["last_seen"],
-                }
-            )
-        return routines
-
-    @classmethod
-    def _routine_match_names(cls, subject: object, payload: dict[str, object]) -> list[str]:
-        names: list[str] = []
-        for value in (subject, payload.get("name")):
-            text = str(value or "").strip()
-            if text:
-                names.append(text)
-        aliases = payload.get("aliases")
-        if isinstance(aliases, list):
-            names.extend(str(alias).strip() for alias in aliases if str(alias).strip())
-        return names
-
-    @classmethod
-    def _score_routine_match(cls, normalized_query: str, names: list[str]) -> float:
-        score = 0.0
-        for name in names:
-            normalized_name = cls._normalize_text(name)
-            if not normalized_name:
-                continue
-            if normalized_query == normalized_name:
-                score = max(score, 10.0)
-            elif normalized_name in normalized_query or normalized_query in normalized_name:
-                score = max(score, 5.0)
-        return score
-
-    @staticmethod
-    def _normalize_text(value: object) -> str:
-        return " ".join(str(value or "").casefold().split())
-
-    def replace_ha_entities(self, entities: list[HomeAssistantEntityRecord]) -> int:
-        if not entities:
-            with self._session_factory() as connection:
-                connection.execute("DELETE FROM ha_entities")
-                connection.commit()
-            return 0
-
-        with self._session_factory() as connection:
-            connection.execute("DELETE FROM ha_entities")
-            connection.executemany(
-                """
-                INSERT INTO ha_entities(
-                    entity_id, domain, state, friendly_name, unit_of_measurement, device_class,
-                    area_name, device_name, aliases_json, attributes_json, search_text,
-                    is_readable, is_actionable, last_synced_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        entity.entity_id,
-                        entity.domain,
-                        entity.state,
-                        entity.friendly_name,
-                        entity.unit_of_measurement,
-                        entity.device_class,
-                        entity.area_name,
-                        entity.device_name,
-                        json.dumps(entity.aliases, ensure_ascii=False),
-                        json.dumps(entity.attributes, ensure_ascii=False),
-                        entity.search_text,
-                        1 if entity.is_readable else 0,
-                        1 if entity.is_actionable else 0,
-                        entity.last_synced_at,
-                    )
-                    for entity in entities
-                ],
-            )
-            connection.commit()
-        return len(entities)
-
-    def get_ha_entity(self, entity_id: str) -> HomeAssistantEntityRecord | None:
-        with self._session_factory() as connection:
-            row = connection.execute(
-                """
-                SELECT entity_id, domain, state, friendly_name, unit_of_measurement, device_class,
-                       area_name, device_name, aliases_json, attributes_json, search_text,
-                       is_readable, is_actionable, last_synced_at
-                FROM ha_entities
-                WHERE entity_id = ?
-                """,
-                (entity_id,),
-            ).fetchone()
-        return self._row_to_ha_entity(row) if row else None
-
-    def list_ha_entities(
-        self,
-        *,
-        domains: list[str] | None = None,
-        actionable_only: bool = False,
-        readable_only: bool = False,
-        limit: int = 1000,
-    ) -> list[HomeAssistantEntityRecord]:
-        safe_limit = max(1, min(limit, 5000))
-        sql = """
-            SELECT entity_id, domain, state, friendly_name, unit_of_measurement, device_class,
-                   area_name, device_name, aliases_json, attributes_json, search_text,
-                   is_readable, is_actionable, last_synced_at
-            FROM ha_entities
-            WHERE 1 = 1
-        """
-        params: list[object] = []
-        normalized_domains = [item.strip().lower() for item in (domains or []) if item.strip()]
-        if normalized_domains:
-            placeholders = ", ".join("?" for _ in normalized_domains)
-            sql += f" AND domain IN ({placeholders})"
-            params.extend(normalized_domains)
-        if actionable_only:
-            sql += " AND is_actionable = 1"
-        if readable_only:
-            sql += " AND is_readable = 1"
-        sql += " ORDER BY domain ASC, friendly_name ASC, entity_id ASC LIMIT ?"
-        params.append(safe_limit)
-        with self._session_factory() as connection:
-            rows = connection.execute(sql, params).fetchall()
-        return [self._row_to_ha_entity(row) for row in rows]
-
-    def last_ha_entities_sync_at(self) -> str | None:
-        with self._session_factory() as connection:
-            row = connection.execute("SELECT MAX(last_synced_at) AS last_synced_at FROM ha_entities").fetchone()
-        if row is None or not row["last_synced_at"]:
-            return None
-        return str(row["last_synced_at"])
 
     def migrate_user_id_values(self, *, old_user_ids: list[str], new_user_id: str) -> dict[str, int]:
         normalized_old_user_ids = [item.strip() for item in old_user_ids if item and item.strip()]
@@ -1558,12 +1126,21 @@ class MemoryStore:
         user_id: str,
         limit: int = 10,
         hours: int | None = None,
+        chat_id: str | None = None,
     ) -> list[ConversationTurnRecord]:
         params: list[object] = [user_id]
         cutoff_clause = ""
         if hours is not None:
             cutoff_clause = " AND created_at >= ?"
             params.append((datetime.now().astimezone() - timedelta(hours=hours)).isoformat())
+        if chat_id is not None:
+            chat_id_expression = (
+                "COALESCE(NULLIF(json_extract(turn_meta_json, '$.chat_id'), ''), "
+                "NULLIF(json_extract(turn_meta_json, '$.callback_metadata.chat_id'), ''), "
+                "NULLIF(json_extract(turn_meta_json, '$.callback_metadata.target_chat_id'), ''))"
+            )
+            cutoff_clause += f" AND ({chat_id_expression} IS NULL OR {chat_id_expression} = ?)"
+            params.append(str(chat_id).strip())
         params.append(limit)
         with self._session_factory() as connection:
             rows = connection.execute(
@@ -1805,234 +1382,6 @@ class MemoryStore:
                     break
         return matches
 
-    def add_reminder(
-        self,
-        *,
-        user_id: str,
-        source_ref: str,
-        text: str,
-        due_at: str,
-        repeat_interval_seconds: int | None = None,
-        repeat_until: str | None = None,
-        status: str = "pending",
-        created_at: str | None = None,
-        sent_at: str | None = None,
-        metadata: dict[str, object] | None = None,
-    ) -> int:
-        self._legacy_reminders_disabled()
-        created_at = created_at or local_now_iso()
-        with self._session_factory() as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO reminders(
-                    user_id, source_ref, text, due_at, status, created_at, sent_at,
-                    repeat_interval_seconds, repeat_until, metadata_json
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    user_id,
-                    source_ref,
-                    text,
-                    due_at,
-                    status,
-                    created_at,
-                    sent_at,
-                    repeat_interval_seconds,
-                    repeat_until,
-                    json.dumps(metadata or {}, ensure_ascii=False),
-                ),
-            )
-            connection.commit()
-            return int(cursor.lastrowid)
-
-    def list_reminders(
-        self,
-        user_id: str,
-        *,
-        status: str | None = None,
-        limit: int = 100,
-    ) -> list[ReminderRecord]:
-        self._legacy_reminders_disabled()
-        safe_limit = max(1, min(limit, 500))
-        params: list[object] = [user_id]
-        sql = """
-            SELECT id, user_id, source_ref, text, due_at, status, created_at, sent_at,
-                   repeat_interval_seconds, repeat_until, metadata_json
-            FROM reminders
-            WHERE user_id = ?
-        """
-        if status:
-            sql += " AND status = ?"
-            params.append(status)
-        sql += " ORDER BY due_at ASC, id ASC LIMIT ?"
-        params.append(safe_limit)
-        with self._session_factory() as connection:
-            rows = connection.execute(sql, params).fetchall()
-        return [self._row_to_reminder(row) for row in rows]
-
-    def due_reminders(self, *, limit: int = 100, now: datetime | None = None) -> list[ReminderRecord]:
-        self._legacy_reminders_disabled()
-        safe_limit = max(1, min(limit, 500))
-        cutoff = (now or datetime.now().astimezone()).isoformat()
-        with self._session_factory() as connection:
-            rows = connection.execute(
-                """
-                SELECT id, user_id, source_ref, text, due_at, status, created_at, sent_at,
-                       repeat_interval_seconds, repeat_until, metadata_json
-                FROM reminders
-                WHERE (
-                    status IN (?, ?)
-                    OR (status = ? AND repeat_interval_seconds IS NOT NULL)
-                )
-                AND due_at <= ?
-                ORDER BY due_at ASC, id ASC
-                LIMIT ?
-                """,
-                ("pending", "failed", "awaiting_confirmation", cutoff, safe_limit),
-            ).fetchall()
-        return [self._row_to_reminder(row) for row in rows]
-
-    def awaiting_confirmation_reminders(self, *, limit: int = 500) -> list[ReminderRecord]:
-        self._legacy_reminders_disabled()
-        safe_limit = max(1, min(limit, 1000))
-        with self._session_factory() as connection:
-            rows = connection.execute(
-                """
-                SELECT id, user_id, source_ref, text, due_at, status, created_at, sent_at,
-                       repeat_interval_seconds, repeat_until, metadata_json
-                FROM reminders
-                WHERE status = ?
-                ORDER BY sent_at ASC, due_at ASC, id ASC
-                LIMIT ?
-                """,
-                ("awaiting_confirmation", safe_limit),
-            ).fetchall()
-        return [self._row_to_reminder(row) for row in rows]
-
-    def next_pending_reminder_due_at(self) -> str | None:
-        self._legacy_reminders_disabled()
-        with self._session_factory() as connection:
-            row = connection.execute(
-                """
-                SELECT due_at
-                FROM reminders
-                WHERE status IN (?, ?)
-                   OR (status = ? AND repeat_interval_seconds IS NOT NULL)
-                ORDER BY due_at ASC, id ASC
-                LIMIT 1
-                """,
-                ("pending", "failed", "awaiting_confirmation"),
-            ).fetchone()
-        return str(row["due_at"]) if row and row["due_at"] else None
-
-    def mark_reminder_sent(self, reminder_id: int, *, user_id: str, sent_at: str | None = None) -> dict | None:
-        self._legacy_reminders_disabled()
-        return self.set_reminder_status(reminder_id, user_id=user_id, status="sent", sent_at=sent_at)
-
-    def set_reminder_status(
-        self,
-        reminder_id: int,
-        *,
-        user_id: str,
-        status: str,
-        sent_at: str | None = None,
-        due_at: str | None = None,
-        metadata: dict[str, object] | None = None,
-    ) -> dict | None:
-        self._legacy_reminders_disabled()
-        sent_at = sent_at or local_now_iso()
-        with self._session_factory() as connection:
-            if due_at is None and metadata is None:
-                cursor = connection.execute(
-                    """
-                    UPDATE reminders
-                    SET status = ?, sent_at = ?
-                    WHERE user_id = ? AND id = ?
-                    """,
-                    (status, sent_at, user_id, reminder_id),
-                )
-            elif due_at is None:
-                cursor = connection.execute(
-                    """
-                    UPDATE reminders
-                    SET status = ?, sent_at = ?, metadata_json = ?
-                    WHERE user_id = ? AND id = ?
-                    """,
-                    (status, sent_at, json.dumps(metadata or {}, ensure_ascii=False), user_id, reminder_id),
-                )
-            elif metadata is None:
-                cursor = connection.execute(
-                    """
-                    UPDATE reminders
-                    SET status = ?, sent_at = ?, due_at = ?
-                    WHERE user_id = ? AND id = ?
-                    """,
-                    (status, sent_at, due_at, user_id, reminder_id),
-                )
-            else:
-                cursor = connection.execute(
-                    """
-                    UPDATE reminders
-                    SET status = ?, sent_at = ?, due_at = ?, metadata_json = ?
-                    WHERE user_id = ? AND id = ?
-                    """,
-                    (status, sent_at, due_at, json.dumps(metadata or {}, ensure_ascii=False), user_id, reminder_id),
-                )
-            connection.commit()
-            if cursor.rowcount == 0:
-                return None
-            row = connection.execute(
-                """
-                SELECT id, user_id, source_ref, text, due_at, status, created_at, sent_at,
-                       repeat_interval_seconds, repeat_until, metadata_json
-                FROM reminders
-                WHERE user_id = ? AND id = ?
-                """,
-                (user_id, reminder_id),
-            ).fetchone()
-        return self._row_to_reminder_dict(row) if row else None
-
-    def cancel_reminder(self, reminder_id: int, *, user_id: str) -> bool:
-        self._legacy_reminders_disabled()
-        return self.set_reminder_status(reminder_id, user_id=user_id, status="cancelled") is not None
-
-    def delete_reminder(self, reminder_id: int, *, user_id: str) -> bool:
-        self._legacy_reminders_disabled()
-        with self._session_factory() as connection:
-            cursor = connection.execute("DELETE FROM reminders WHERE user_id = ? AND id = ?", (user_id, reminder_id))
-            connection.commit()
-            return cursor.rowcount > 0
-
-    def get_reminder(self, reminder_id: int, *, user_id: str) -> ReminderRecord | None:
-        self._legacy_reminders_disabled()
-        with self._session_factory() as connection:
-            row = connection.execute(
-                """
-                SELECT id, user_id, source_ref, text, due_at, status, created_at, sent_at,
-                       repeat_interval_seconds, repeat_until, metadata_json
-                FROM reminders
-                WHERE user_id = ? AND id = ?
-                """,
-                (user_id, reminder_id),
-            ).fetchone()
-        return self._row_to_reminder(row) if row else None
-
-    def get_reminder_by_source_ref(self, *, user_id: str, source_ref: str) -> ReminderRecord | None:
-        self._legacy_reminders_disabled()
-        with self._session_factory() as connection:
-            row = connection.execute(
-                """
-                SELECT id, user_id, source_ref, text, due_at, status, created_at, sent_at,
-                       repeat_interval_seconds, repeat_until, metadata_json
-                FROM reminders
-                WHERE user_id = ? AND source_ref = ?
-                ORDER BY id DESC
-                LIMIT 1
-                """,
-                (user_id, source_ref),
-            ).fetchone()
-        return self._row_to_reminder(row) if row else None
 
     def add_knowledge_upload_session(
         self,
@@ -2147,7 +1496,9 @@ class MemoryStore:
         if not query_embedding:
             return []
 
-        effective_user_id = (user_id or "").strip() or "VST"
+        effective_user_id = (user_id or "").strip()
+        if not effective_user_id:
+            raise ValueError("Embedding search requires a non-empty user_id")
         global_user_id = "global"
         if include_global and effective_user_id != global_user_id:
             sql = """
@@ -2228,6 +1579,56 @@ class MemoryStore:
         params.extend(expanded_params)
         return sql, params
 
+    @staticmethod
+    def _normalize_fact_inclusion(inclusion: str | None) -> str | None:
+        if inclusion is None:
+            return None
+        normalized = str(inclusion).strip().casefold()
+        if normalized not in {"mandatory", "contextual"}:
+            raise ValueError("inclusion must be 'mandatory' or 'contextual'")
+        return normalized
+
+    @staticmethod
+    def _normalize_fact_tags(tags: list[str] | None) -> list[str]:
+        if not isinstance(tags, list):
+            return []
+        return [str(tag).strip() for tag in tags if str(tag).strip()]
+
+    @staticmethod
+    def _load_fact_tags(raw_json: str | None) -> list[str]:
+        try:
+            value = json.loads(raw_json or "[]")
+        except (TypeError, json.JSONDecodeError):
+            return []
+        return [str(tag).strip() for tag in value if str(tag).strip()] if isinstance(value, list) else []
+
+    @staticmethod
+    def _apply_fact_inclusion(tags: list[str], inclusion: str | None) -> list[str]:
+        result = sorted(set(tags))
+        if inclusion == "mandatory":
+            if MANDATORY_TAG not in result:
+                result.append(MANDATORY_TAG)
+                result.sort()
+        elif inclusion == "contextual":
+            result = [tag for tag in result if tag != MANDATORY_TAG]
+        return result
+
+    @staticmethod
+    def _delete_fact_embedding(connection, *, user_id: str, fact_id: int) -> None:
+        connection.execute(
+            """
+            DELETE FROM memory_embeddings
+            WHERE user_id = ? AND source_type = ? AND source_ref = ?
+            """,
+            (user_id, FACT_EMBEDDING_SOURCE_TYPE, f"{FACT_EMBEDDING_SOURCE_PREFIX}{int(fact_id)}"),
+        )
+
+    @staticmethod
+    def _fact_embedding_needs_invalidation(old_fact: dict, next_fact: dict) -> bool:
+        return fact_embedding_text(old_fact) != fact_embedding_text(next_fact) or (
+            not is_mandatory_fact(old_fact) and is_mandatory_fact(next_fact)
+        )
+
     def _row_to_fact_dict(self, row) -> dict:
         return {
             "id": int(row["id"]),
@@ -2244,22 +1645,6 @@ class MemoryStore:
             "tags": json.loads(row["tags_json"] or "[]"),
         }
 
-    def _row_to_reminder(self, row) -> ReminderRecord:
-        return ReminderRecord(
-            id=int(row["id"]),
-            user_id=row["user_id"],
-            source_ref=row["source_ref"],
-            text=row["text"],
-            due_at=row["due_at"],
-            status=row["status"],
-            created_at=row["created_at"],
-            sent_at=row["sent_at"],
-            repeat_interval_seconds=(
-                int(row["repeat_interval_seconds"]) if row["repeat_interval_seconds"] is not None else None
-            ),
-            repeat_until=row["repeat_until"],
-            metadata=self._load_json_object(row["metadata_json"]),
-        )
 
     def _row_to_knowledge_upload_session(self, row) -> KnowledgeUploadSessionRecord:
         return KnowledgeUploadSessionRecord(
@@ -2278,110 +1663,6 @@ class MemoryStore:
             metadata=self._load_json_object(row["metadata_json"]),
         )
 
-    def _row_to_ha_entity(self, row) -> HomeAssistantEntityRecord:
-        aliases_value = self._load_json_array(row["aliases_json"])
-        aliases = [str(item).strip() for item in aliases_value if str(item).strip()]
-        return HomeAssistantEntityRecord(
-            entity_id=row["entity_id"],
-            domain=row["domain"],
-            state=row["state"],
-            friendly_name=row["friendly_name"],
-            unit_of_measurement=row["unit_of_measurement"],
-            device_class=row["device_class"],
-            area_name=row["area_name"],
-            device_name=row["device_name"],
-            aliases=aliases,
-            attributes=self._load_json_object(row["attributes_json"]),
-            search_text=row["search_text"],
-            is_readable=bool(int(row["is_readable"])),
-            is_actionable=bool(int(row["is_actionable"])),
-            last_synced_at=row["last_synced_at"],
-        )
-
-    def _row_to_skill(self, row) -> SkillRecord:
-        return SkillRecord(
-            skill_id=row["skill_id"],
-            intent_id=row["intent_id"],
-            scope=row["scope"],
-            owner_user_id=row["owner_user_id"],
-            enabled=bool(int(row["enabled"])),
-            priority=int(row["priority"]),
-            description=row["description"],
-            tags=[str(item) for item in self._load_json_array(row["tags_json"])],
-            variables_schema=self._load_json_object(row["variables_schema_json"]),
-            steps=[
-                item
-                for item in self._load_json_array(row["steps_json"])
-                if isinstance(item, dict)
-            ],
-            embedding=[float(value) for value in self._load_embedding_vector(row["embedding_json"])],
-            content_hash=row["content_hash"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
-
-    def _row_to_intent(self, row) -> IntentRecord:
-        return IntentRecord(
-            intent_id=row["intent_id"],
-            kind=row["kind"],
-            enabled=bool(int(row["enabled"])),
-            description=row["description"],
-            is_default=bool(int(row["is_default"])),
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
-
-    def _row_to_task(self, row) -> TaskRecord:
-        return TaskRecord(
-            id=int(row["id"]),
-            user_id=row["user_id"],
-            source_ref=row["source_ref"],
-            skill_id=row["skill_id"],
-            task_group_id=row["task_group_id"],
-            parent_task_id=int(row["parent_task_id"]) if row["parent_task_id"] is not None else None,
-            status=row["status"],
-            execution_mode=row["execution_mode"],
-            due_at=row["due_at"],
-            repeat_policy=row["repeat_policy"],
-            repeat_interval_seconds=(
-                int(row["repeat_interval_seconds"]) if row["repeat_interval_seconds"] is not None else None
-            ),
-            repeat_count=int(row["repeat_count"]) if row["repeat_count"] is not None else None,
-            repeat_until=row["repeat_until"],
-            run_count=int(row["run_count"]),
-            priority=int(row["priority"]),
-            payload=self._load_json_object(row["payload_json"]),
-            steps=[
-                item
-                for item in self._load_json_array(row["steps_json"])
-                if isinstance(item, dict)
-            ],
-            requires_confirmation=bool(int(row["requires_confirmation"])),
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-            completed_at=row["completed_at"],
-            cancelled_at=row["cancelled_at"],
-            last_error=row["last_error"],
-        )
-
-    def _row_to_task_run(self, row) -> TaskRunRecord:
-        return TaskRunRecord(
-            id=int(row["id"]),
-            task_id=int(row["task_id"]),
-            task_group_id=row["task_group_id"],
-            status=row["status"],
-            started_at=row["started_at"],
-            finished_at=row["finished_at"],
-            result=self._load_json_object(row["result_json"]),
-            error_text=row["error_text"],
-            cancelled_by_task_id=(
-                int(row["cancelled_by_task_id"]) if row["cancelled_by_task_id"] is not None else None
-            ),
-        )
-
-    def _row_to_reminder_dict(self, row) -> dict:
-        reminder = self._row_to_reminder(row)
-        return reminder.model_dump()
 
     def _row_to_knowledge_upload_session_dict(self, row) -> dict[str, object]:
         session = self._row_to_knowledge_upload_session(row)
@@ -2415,13 +1696,6 @@ class MemoryStore:
     def _dump_json_object(value: dict[str, object] | None) -> str:
         return json.dumps(value or {}, ensure_ascii=False)
 
-    @staticmethod
-    def _load_json_array(raw_json: str) -> list[object]:
-        try:
-            value = json.loads(raw_json or "[]")
-        except json.JSONDecodeError:
-            return []
-        return value if isinstance(value, list) else []
 
     @staticmethod
     def _cosine_similarity(left: list[float], right: list[float]) -> float:

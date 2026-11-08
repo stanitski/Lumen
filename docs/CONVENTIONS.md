@@ -25,7 +25,8 @@
 - network/LLM/STT orchestration — `async`;
 - незалежні memory searches збираються через `asyncio.gather()` та
   `asyncio.to_thread()`;
-- async callback ingress створює `asyncio.create_task()`;
+- async callback ingress реєструє tasks через `_start_background_task()`;
+  shutdown скасовує й очікує tracked tasks, unexpected exceptions логуються;
 - блокувальні SQLite queries лишаються sync і виконуються вузько.
 
 ### Помилки
@@ -71,7 +72,7 @@
 Це рекомендації аудиту, а не усталений contract:
 
 - не додавати новий module-level singleton без test injection seam;
-- не розширювати `models.py`/`memory/store.py`, доки legacy API не ізольовано;
+- додавати в `models.py`/`memory/store.py` лише contracts із підтвердженим caller;
 - перейменувати `build_planner_context` лише окремим compatibility-aware change;
 - для нового external source вимагати typed contract, policy, bounded fetch,
   truthful failure і focused tests;
@@ -79,8 +80,7 @@
 
 ## Винятки і борг
 
-- `run.bat` не відповідає типовому Windows batch syntax;
-- `MemoryStore` містить legacy methods до таблиць, яких немає у schema `v34`;
-- legacy Pydantic models і JSON seeds не відображають current architecture;
+- legacy execution models/store API/JSON seeds видалено; DB migrations
+  збережено для сумісності існуючих баз;
 - коментарі/імена з `planner` можуть означати retrieval contract, а не active
   planner subsystem.

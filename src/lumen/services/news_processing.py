@@ -118,7 +118,9 @@ class NewsProcessingService:
     extractor and precise news-memory query are supplied by the API wiring layer.
     """
 
-    REQUEST_DEADLINE_SECONDS = 180.0
+    # Temporary operational relief while the two sequential Ollama calls are
+    # optimized. Keep this below the Home Assistant REST timeout.
+    REQUEST_DEADLINE_SECONDS = 300.0
     RSS_FALLBACK_MIN_CHARS = 160
     ARTICLE_CONTEXT_CHAR_LIMIT = 12_000
 

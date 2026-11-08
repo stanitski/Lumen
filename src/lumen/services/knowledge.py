@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
 import re
 
 from fastapi import HTTPException, UploadFile
 
-from lumen.config import Settings
+from lumen.config import DEFAULT_LUMEN_USER_ID, Settings
 from lumen.connectors.ollama import OllamaConnector
 from lumen.memory.store import MemoryStore
 from lumen.models import KnowledgeScope, KnowledgeUploadResult
@@ -23,7 +25,7 @@ class KnowledgeService:
         ollama: OllamaConnector,
         settings: Settings,
         *,
-        default_user_id: str = "VST",
+        default_user_id: str = DEFAULT_LUMEN_USER_ID,
         logger: logging.Logger | None = None,
     ) -> None:
         self._store = store
@@ -37,15 +39,6 @@ class KnowledgeService:
             return "global"
         effective_user_id = (user_id or "").strip()
         return effective_user_id or self._default_user_id
-
-    def home_assistant_url(self) -> str:
-        return self._settings.home_assistant_url.strip()
-
-    def home_assistant_token(self) -> str:
-        return self._settings.home_assistant_token.strip()
-
-    def timeout_seconds(self) -> float:
-        return float(self._settings.ollama_timeout_seconds)
 
     @staticmethod
     def _normalize_source_ref(value: str | None, fallback: str) -> str:
@@ -119,38 +112,39 @@ class KnowledgeService:
             raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
         try:
-            _, text = FileTextExtractor.extract_text(filename=filename, content_type=content_type, raw=raw)
+            _, text = await asyncio.to_thread(
+                FileTextExtractor.extract_text, filename=filename, content_type=content_type, raw=raw
+            )
         except FileTextExtractionError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         chunks = self._chunk_text(text, max_chunk_chars=max_chunk_chars)
         if not chunks:
             raise HTTPException(status_code=400, detail="No indexable text was found in the uploaded file.")
 
-        deleted_embeddings = self._store.delete_embeddings(
-            user_id=ingest_user_id,
-            source_ref=self._knowledge_source_ref(kind=kind, scope=scope, source_ref=source_ref),
-            source_type=f"knowledge_{kind}_{scope}",
-        )
-
         embedding_payload = await self._ollama.embed(input=chunks, model=self._settings.ollama_embedding_model)
-        embeddings = embedding_payload.get("embeddings")
+        embeddings = embedding_payload.get("embeddings") if isinstance(embedding_payload, dict) else None
         if not isinstance(embeddings, list) or len(embeddings) != len(chunks):
             raise RuntimeError("Ollama returned an unexpected embeddings payload")
 
-        embeddings_created = 0
+        prepared: list[tuple[str, list[float], dict[str, object]]] = []
+        dimensions: int | None = None
         safe_filename = filename or "upload"
         for chunk_index, (chunk, vector) in enumerate(zip(chunks, embeddings)):
             if not isinstance(vector, list) or not vector:
                 raise RuntimeError(f"Invalid embedding vector for chunk {chunk_index}")
-            self._store.add_embedding(
-                user_id=ingest_user_id,
-                source_type=f"knowledge_{kind}_{scope}",
-                source_ref=self._knowledge_source_ref(kind=kind, scope=scope, source_ref=source_ref),
-                chunk_index=chunk_index,
-                content=chunk,
-                embedding=[float(value) for value in vector],
-                importance=6,
-                metadata={
+            try:
+                values = [float(value) for value in vector]
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise RuntimeError(f"Invalid embedding vector for chunk {chunk_index}") from exc
+            if not all(math.isfinite(value) for value in values) or not any(values):
+                raise RuntimeError(f"Invalid embedding vector for chunk {chunk_index}")
+            if dimensions is not None and len(values) != dimensions:
+                raise RuntimeError(f"Inconsistent embedding dimensions for chunk {chunk_index}")
+            dimensions = len(values)
+            prepared.append((
+                chunk,
+                values,
+                {
                     "kind": "text",
                     "document_kind": kind,
                     "filename": safe_filename,
@@ -160,8 +154,16 @@ class KnowledgeService:
                     "chunk_count": len(chunks),
                     "max_chunk_chars": max_chunk_chars,
                 },
-            )
-            embeddings_created += 1
+            ))
+
+        embeddings_created = await asyncio.to_thread(
+            self._store.replace_embeddings,
+            user_id=ingest_user_id,
+            source_type=f"knowledge_{kind}_{scope}",
+            source_ref=self._knowledge_source_ref(kind=kind, scope=scope, source_ref=source_ref),
+            chunks=prepared,
+            importance=6,
+        )
 
         return KnowledgeUploadResult(
             status="indexed",
@@ -187,7 +189,6 @@ class KnowledgeService:
         scope: KnowledgeScope,
     ) -> KnowledgeUploadResult:
         messages = {
-            "pdf": "PDF upload received, but PDF text extraction is not implemented yet.",
             "image": "Image upload received, but OCR / vision extraction is not implemented yet.",
             "video": "Video upload received, but video frame/audio extraction is not implemented yet.",
         }

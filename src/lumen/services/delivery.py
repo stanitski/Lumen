@@ -14,6 +14,7 @@ from lumen.models import HomeAssistantCallbackPayload
 
 class DeliveryService:
     VOICE_CHUNK_MAX_CHARS = 1800
+    TELEGRAM_TEXT_MAX_UNITS = 4096
 
     def __init__(self, settings: Settings, logger: logging.Logger | None = None) -> None:
         self._settings = settings
@@ -189,6 +190,30 @@ class DeliveryService:
             f"Home Assistant callback failed with status {response.status_code}."
         )
 
+    async def _deliver_callback(self, payload: HomeAssistantCallbackPayload) -> None:
+        if (
+            payload.voice
+            or payload.metadata.get("target_channel") != "telegram"
+            or len(payload.answer.encode("utf-16-le")) // 2 <= self.TELEGRAM_TEXT_MAX_UNITS
+        ):
+            await self.post_home_assistant_callback(payload)
+            return
+
+        # A Unicode character can occupy two UTF-16 units. Keep every part
+        # within Telegram's limit even when the answer contains emoji.
+        chunks = self._split_voice_chunks(payload.answer, self.TELEGRAM_TEXT_MAX_UNITS // 2)
+        for index, chunk in enumerate(chunks, start=1):
+            part = payload.model_copy(update={
+                "answer": chunk,
+                "metadata": {
+                    **payload.metadata,
+                    "part_index": index,
+                    "part_count": len(chunks),
+                },
+            })
+            # Await each acceptance; do not hide failures or retry delivered parts.
+            await self.post_home_assistant_callback(part)
+
     async def deliver_chat_answer(
         self,
         *,
@@ -201,7 +226,7 @@ class DeliveryService:
         normalized_answer = self._normalize_plain_text(answer)
         voice_chunks = self._split_voice_chunks(normalized_answer, self.VOICE_CHUNK_MAX_CHARS) if voice else []
         callback_answer = voice_chunks[0] if voice_chunks else normalized_answer
-        await self.post_home_assistant_callback(
+        await self._deliver_callback(
             HomeAssistantCallbackPayload(
                 request_id=request_id,
                 kind="chat",
@@ -247,7 +272,7 @@ class DeliveryService:
         metadata: dict[str, object] | None = None,
     ) -> None:
         normalized_answer = self._normalize_plain_text(answer)
-        await self.post_home_assistant_callback(
+        await self._deliver_callback(
             HomeAssistantCallbackPayload(
                 request_id=request_id,
                 kind="knowledge",

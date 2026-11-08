@@ -87,6 +87,11 @@ def request(**changes: object) -> NewsProcessingRequest:
 
 
 class NewsProcessingServiceTests(unittest.IsolatedAsyncioTestCase):
+    def test_default_request_deadline_is_temporarily_300_seconds(self) -> None:
+        service = NewsProcessingService(extractor=FakeExtractor(), ollama=FakeOllama([]))
+
+        self.assertEqual(300.0, service._request_deadline_seconds)
+
     async def test_keep_uses_final_canonical_url_and_stable_todo_key(self) -> None:
         final_url = "https://agency.example/final-story"
         service = NewsProcessingService(

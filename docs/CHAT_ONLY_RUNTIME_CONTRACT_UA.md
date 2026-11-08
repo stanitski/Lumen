@@ -6,7 +6,7 @@
 
 Активний шлях:
 
-`Ingress -> ChatOnlyService -> MemoryService context -> optional ContextExecutor reads -> Ollama dialogue -> SQLite persistence -> DeliveryService`
+`Ingress -> shared chronological context -> ChatOnlyService/MemoryService routing -> optional ContextExecutor reads -> Ollama/action -> ConversationService persistence and delivery`
 
 ## Що зараз активно
 
@@ -20,6 +20,8 @@
 - calendar create через `CalendarActionService` і current-day projection через `HomeAssistantCalendarClient`;
 - synchronous `POST /news/process` через `NewsProcessingService` (окремо від chat/callback flow);
 - memory manager і debug search.
+- shared chronological history для user-facing turns, reminder/calendar results,
+  nutrition interactions і knowledge upload result.
 
 ## Що зараз не є runtime-фічами
 
@@ -30,6 +32,43 @@
 - legacy broad Telegram ingestion;
 - generic action executor; reminder recovery/wake і calendar projection працюють у власних вузьких paths.
 
+## Контракт спільної історії
+
+Telegram: прямий запит прочитати переписку з конкретним `@username` дозволяє
+read-only доступ до цього користувача без додавання до `messenger_context`.
+Routing лишається model-driven: `telegram/search`, `source_kind=user`,
+`scope=explicit_chat`. Дозвіл перевіряється за ref у поточному user text,
+а не лише в model query; resolved entity має бути `User`. Канали, групи й
+неявний вибір джерел лишаються обмежені збереженим списком. Для імені без
+`@username`, якого немає в каталозі, автоматичний пошук контакту не реалізовано.
+
+`ConversationService` завершує user-facing взаємодію: `finish()` зберігає turn
+через `MemoryService`, за потреби доставляє callback і запускає post-processing;
+`record_event()` додає assistant-only подію без доставки. До routing і відповіді
+завантажується bounded chronological context того самого користувача та, коли
+доступний, того самого chat. Turns з невідомим chat ID лишаються сумісними;
+контекст обмежений налаштуваннями часу, кількості й символів та подається як
+untrusted evidence.
+
+У shared history належать звичайні chat turns, user-facing результати
+reminder/calendar дій, nutrition записи/виправлення/уточнення та короткий
+результат knowledge upload. Due reminder після успішної доставки додається як
+assistant-only `reminder_notification` з порожнім питанням і стабільним
+`event_id` на основі `delivery_id`. Якщо запис історії не вдався, reminder не
+доставляється повторно; запис повторюється ідемпотентно з `awaiting_confirmation`
+під час наступного циклу.
+
+Transport IDs, receipts, service synchronization і внутрішні classifier events
+не є utterances. `POST /news/process` лишається request-driven Feedreader API;
+його article fetch, classification і Todo plumbing не додаються до conversation
+context. Окреме питання користувача про новини обробляється звичайним chat і
+зберігається як звичайний user-facing turn.
+
+Одноразовий `python -m lumen.reminder_wakeup` створює той самий
+`ConversationService`: event записується до завершення процесу, а індексація
+запускається task-local і скасовується при виході. Незавершений turn лишається в
+SQLite для звичайного runtime recovery.
+
 ## Контракт пам'яті
 
 - `conversation_turns` зберігає user/assistant turn pair і retrieval metadata;
@@ -38,9 +77,10 @@
 - post-processing після turn persistence може добувати нові facts і оновлювати dialogue metadata;
 - debug search використовує той самий live context-building path, але не створює новий turn і не викликає delivery.
 
-Для звичайного chat порядок: `add_turn()` → callback delivery, якщо ввімкнено →
-`postprocess_dialogue_turn()` для збереженого turn. Inline API пропускає callback
-і повертає результат після processing. Delivery failure не блокує post-processing.
+Для user-facing interaction `ConversationService.finish()` виконує persistence →
+callback delivery, якщо ввімкнено → `postprocess_dialogue_turn()`. Inline API
+пропускає callback і повертає результат після processing. Delivery failure не
+блокує post-processing.
 Користувач `global` не зберігає turn. У request або callback metadata прапорці
 `debug`, `debug_request`, `lumen_debug`, `skip_memory`, `disable_memory` також
 вимикають turn persistence і його post-processing, якщо значення — boolean
@@ -88,8 +128,9 @@ backfill — окрема operator procedure. Збій embeddings дає lexical
 `selected_facts` містить саме відформатовані facts. `knowledge` у `/memory/items`
 не включає службові embeddings фактів.
 
-Детерміновані reminder/calendar replies, internal classifiers і news pipeline
-не переводяться на цей dialogue prompt.
+Детерміновані reminder/calendar replies не йдуть через Ollama dialogue prompt,
+але їхні user-facing результати записуються у shared history. Internal
+classifiers і news processing лишаються поза dialogue history.
 
 ## Контракт зовнішнього контексту
 
@@ -99,8 +140,10 @@ backfill — окрема operator procedure. Збій embeddings дає lexical
 - `web/search`
 - `home_assistant/read_state`
 - `knowledge/search`
+- `nutrition/summary`
 
-`telegram/search` і `web/search` реалізовані. `home_assistant/read_state` та
+`telegram/search`, `web/search` і `nutrition/summary` реалізовані.
+`home_assistant/read_state` та
 contract-requested `knowledge/search` повертають `pending_implementation`.
 Звичайний knowledge retrieval активний окремо через
 `MemoryService.build_planner_context()`.
@@ -124,7 +167,8 @@ contract-requested `knowledge/search` повертають `pending_implementati
 `/connector` підтримує:
 
 - `event_type="text"` для plain text;
-- `event_type="attachment"` лише для STT-supported audio/video files.
+- `event_type="attachment"` для STT-supported audio/video files або Telegram food photos;
+- `event_type="nutrition_delivery"` для прив'язки HA sent-message ID до nutrition entry.
 
 Attachment path:
 
@@ -134,12 +178,36 @@ Attachment path:
 
 ## Фото та харчування
 
-`OllamaConnector.chat_multimodal()` підтримує серіалізацію image bytes у base64,
-але цей шлях не підключений до chat ingress. `/connector` повертає
-`unsupported_attachment` для фото; `/api/chat` витягає лише текст. Knowledge
-image upload не виконує OCR/vision extraction. Розпізнавання страв/калорій і
-структурований журнал харчування не реалізовані. `nutrition_*` у historical
-JSON та retention/topic classification не є активним nutrition executor.
+Telegram фото через `/connector` передається до окремого `NutritionService`,
+який викликає `OllamaConnector.chat_multimodal()`. Текстові виправлення
+змінюють останній або reply-selected запис. JSON state/CSV зберігаються
+поза SQLite; user-facing nutrition result записується через
+`ConversationService`. Summary читає authoritative JSON через
+`ContextExecutor`, а не history. Schema не змінена. `/api/chat` витягає лише текст;
+knowledge image upload не виконує OCR/vision extraction. Контракти та HA
+підготовка описані в `NUTRITION.md`. Historical `nutrition_*` retention/topic
+labels не є частиною цього isolated service.
+
+Невикористані execution JSON seeds і legacy models/store APIs видалено
+2026-10-07; historical документи та retention/topic labels не активують їх.
+
+## Цілісність knowledge і memory API
+
+Knowledge ingestion перевіряє кількість, числові значення, скінченність,
+ненульовість і однакову розмірність усіх vectors до mutation. Заміна всіх chunks
+одного `(user_id, source_type, source_ref)` проходить однією transaction;
+помилка Ollama або SQLite не залишає видалений чи частково оновлений індекс.
+Скасування під час Ollama call зберігає попередній індекс; уже розпочатий DB write
+у worker thread завершується атомарно, навіть якщо async caller скасовано.
+
+Memory UI і API без explicit user використовують normalized `LUMEN_USER_ID`.
+`/memory/delete` обмежує видалення turn заданим user scope, невалідний або
+непозитивний ID повертає HTTP 400. Це scoping contract, не authentication layer.
+Low-level embedding search вимагає непорожній `user_id` без implicit personal fallback.
+
+Chat/connector, reminder recovery і calendar tasks утримуються в app registry.
+Unexpected exceptions логуються з task label; shutdown скасовує й очікує всі
+tracked tasks. Незавершений chat не зберігається як durable job для повтору.
 
 ## Reminder lifecycle
 
@@ -152,6 +220,7 @@ JSON та retention/topic classification не є активним nutrition exec
 ## Delivery
 
 - async `/chat` і `/connector` доставляють відповідь через `DeliveryService`;
+- текстові (`voice=false`) Telegram callbacks понад 4096 UTF-16 units діляться на частини на межах абзаців/речень/слів (довге слово — за символами). Кожна частина надходить окремим послідовним callback зі спільним `request_id` та `metadata.part_index` / `part_count`; короткі відповіді й voice flow зберігають формат. Помилка частини припиняє надсилання і повертається caller; автоматичного повтору вже прийнятих частин немає. HA forwarder має обробляти кожен callback (режим `queued`, якщо попередня обробка ще триває). HTTP acceptance не підтверджує доставку в Telegram. Потрібні rebuild/restart та live перевірка HA forwarder;
 - звичайний чат визначає `voice` через чинний `MemoryService.should_enable_voice_response`: «вголос»/«вслух» у запиті (без урахування регістру) або збережена голосова перевага користувача вмикає озвучення; без них `voice=false`;
 - цей прапорець передається в `ChatResult` і стандартний callback HA; `skip_memory` не вимикає розпізнавання голосової команди. Окремі acknowledgement-відповіді reminders/calendar не змінюються;
 - inline `/api/chat` і `/api/generate` повертають той самий semantic result без callback;

@@ -1,5 +1,72 @@
 # Lumen Decisions
 
+## 2026-10-27 — Explicit Telegram person requests grant read access
+
+- Decision: a person ref explicitly present in current user text authorizes
+  bounded read-only lookup for that request without a persisted source fact.
+  A ref supplied only by the model does not authorize access. Resolve the entity
+  and require `User` before reading a personal chat; channels and groups retain
+  the source-catalog policy. Routing remains model-driven.
+- This supersedes the all-source allowlist requirement below for explicit
+  personal-chat requests only. Unknown names without a ref remain unsupported.
+
+## 2026-10-08 — Isolate nutrition persistence from chat memory
+
+- Telegram photo estimates and explicit corrections belong to `NutritionService`,
+  using the configured vision-capable Ollama model and existing HA delivery.
+- Per-user JSON is authoritative; CSV is a four-column UTF-8 BOM projection.
+  Atomic replacement and persisted receipts recover projection failures without
+  repeating analysis or adding a duplicate for the same user/chat/message.
+- Corrections retain the initial meal time unless explicitly changed. Replies
+  select only a known entry in the same user/chat, including HA-local tagged
+  confirmation messages. No SQLite schema migration or general planner is added.
+- One process owns the journal directory. Deployment and actual Telegram/Ollama
+  verification are separate from the source implementation.
+
+## 2026-10-07 — Remove unused execution code and preserve atomic knowledge updates
+
+- Removed planner/task/HA-catalog models, unused store APIs and JSON seeds only
+  after verifying callers across source, tests and scripts. SQLite schema,
+  migrations and bundled timezone data remain unchanged.
+- Knowledge vectors are fully validated before replacing one document in one
+  transaction. Failure preserves the previous complete index; DB writes and
+  document extraction run outside the event loop.
+- User defaults are normalized in Settings; low-level search requires explicit
+  scope, and memory turn deletion enforces that scope. Existing default user
+  remains compatible; no identity is hardcoded in memory UI.
+- Background tasks are retained, failures retrieved/logged, and outstanding
+  tasks cancelled/awaited on shutdown. This does not introduce a durable queue.
+- API tests import the app through an isolated bootstrap to prevent configured
+  DB/calendar access. Production deployment is a separate operation.
+
+## 2026-09-08 — Keep the one-file runtime outside Windows Temp
+
+- Context: a healthy `dist/Lumen.exe` ran for several days from
+  `%TEMP%\_MEI210282`, after which system cleanup left only 38 files (29 MB).
+  The process and port stayed alive, but the missing CA/runtime data made
+  `ssl.create_default_context()` raise `FileNotFoundError`. Ollama, Telegram,
+  Home Assistant callback and calendar connections all failed before network
+  I/O.
+- Decision: retain the one-file deployment, but build it with
+  `--runtime-tmpdir` pointing to `data\runtime`, derived from the repository
+  directory by `compile.bat`. Do not use the OS Temp directory for live Lumen
+  extraction.
+- Consequences: Windows Temp cleanup cannot invalidate a running packaged
+  process. The build path is resolved into `Lumen.spec`, so moving the checkout
+  requires rebuilding. Normal PyInstaller shutdown still owns cleanup of its
+  generated `_MEI*` child directory.
+- Revisit when: deployment changes to an onedir package or a service installer
+  with its own versioned runtime directory.
+
+## 2026-08-31 — Separate standing communication rules from contextual facts
+
+- Context: `essential preferences` were selected only after `include_facts`; greetings and several answer modes disabled all facts. The old top-three preference rule also treated unrelated preferences as mandatory.
+- Decision: persist explicit `lumen:mandatory` tags without schema changes. Standing user communication instructions are classified during extraction; task-local instructions are not durable rules. Explicit updates validate the target owner/identity and replace the reserved marker rather than unioning it forever.
+- Decision: a separate `FactContextService` loads mandatory personal facts independently of contextual limits. It retrieves contextual facts by cosine similarity plus lexical matches in every answer mode; existing knowledge and dialogue policies stay separate. Current explicit user instructions can override a preference for one response, not security or capability restrictions.
+- Decision: reuse `memory_embeddings` with `source_type=memory_fact`, stable fact refs, and model/content hashes. Live rows remain authoritative; invalid/expired/stale/orphaned vectors cannot provide semantic evidence. Failed indexing does not roll back facts; post-processing and the operator backfill retry it.
+- Consequences: short prompts now may require one fact-query embedding. Mandatory rules remain available without semantic retrieval. Contextual defaults are configurable; the similarity threshold is 0.37, calibrated from an initial 0.55 against 8 positive multilingual queries and 6 unrelated queries with the configured embeddinggemma model; this small check is not a comprehensive quality benchmark. Production preparation must be backed up; executable deployment remains a separate operation.
+- Revisit when: measured multilingual retrieval quality requires threshold/ranking changes, or the standing-rule corpus approaches model prompt capacity. Never silently truncate mandatory rules.
+
 This file stores durable technical, architectural, database, reporting, integration, naming, and business-logic decisions that future work should reuse instead of rediscovering.
 
 ## 2026-08-27 - Не ретраїти недостатній контекст Feedreader
@@ -400,3 +467,33 @@ This file stores durable technical, architectural, database, reporting, integrat
   The planner/executor contract stays narrower, and operator tooling should favor routine management over casual skill authoring.
 - Revisit when:
   Lumen gains an approved user-facing skill authoring workflow with validation and lifecycle controls.
+
+
+## 2026-10-18 — deterministic nutrition output contract
+- Nutrition structured extraction disables thinking, consistent with existing structured extraction calls. Real configured-model photo request timed out at 240 seconds with default thinking; disabling it produced a response in seconds.
+- `estimate` is required but nullable in the generated schema. Cross-field validation still requires a complete estimate for record/update. This prevents schema-valid omission observed during real-photo validation; persisted journal schema is unchanged.
+- Keep exact Home Assistant origin checks; align deployment configuration rather than trust DNS aliases or remove the credential boundary.
+
+
+## 2026-10-18 — explicit text meal creation
+Nutrition accepts explicit text requests to add food without a photo. Model intent selects record/update/clarify/unrelated; no keyword routing or new configuration. A record always clears the previous candidate and uses the incoming message timestamp. `new_entry` distinguishes clarification of a new meal from clarification of the existing candidate. Unknown reply targets never fall back to the latest meal. Existing storage schema remains unchanged.
+
+
+## 2026-10-18 — одна розмова незалежно від сервісу
+- Користувацькі взаємодії всіх сервісів мають спільну історію; тільки обробка новин залишається поза контекстом за прямою вказівкою користувача. Технічна кореляція не є реплікою.
+- Єдиний lifecycle ConversationService використовує наявну conversation_turns + turn_meta_json: стабільний ID transport event, атомарна dedup transaction, окремі результати виконання/збереження/доставки. Повтор доставки не виконує успішну бізнес-операцію вдруге.
+- Помилка харчування може бути замінена успішним результатом того самого повідомлення без нового рядка історії; JSON receipts запобігають повторному meal write після збою CSV/історії.
+- Контекст розмови потрібен маршрутизатору та генератору. У prompt передається обмежене останнє вікно, давніші релевантні дані залишаються у retrieval; повна історія не додається без обмежень.
+- Історія пояснює посилання користувача; актуальні суми/статуси читаються зі сховищ сервісів. Калорії рахує код, а не модель за текстами попередніх відповідей.
+- Service events індексуються для діалогового пошуку; автоматичне виділення durable facts виконується для звичайного chat, не кожного службового результату.
+
+
+## 2026-10-18 — HA automation approval boundary
+- User requires one communication channel with Lumen and explicitly prohibits adding additional Home Assistant automations without prior agreement. Removed separate nutrition sent-correlation automation rather than introducing a replacement. Domain logic belongs in Lumen. Transport-only events are not a justification to add new automations without agreement.
+
+
+## 2026-11-09 — local memory administration and answer evidence
+
+- `/memory` is a local operator interface: new admin routes require loopback peer/Host and reject cross-origin requests; no new authentication settings or SQLite migration.
+- Explain a test answer with its actual supplied memory/prompt snapshot, not regenerated retrieval and not claimed per-sentence model attribution. Editing a preview fact uses the original persisted-field revision; atomic optimistic checks prevent overwriting newer memory.
+- Reuse `MemoryStore.update_fact`/`delete_fact` and `FactContextService.sync_index`; preserve source/expiry/metadata and report index failure separately from saved content. Preview uses the chat context builder without persistence, delivery or action execution.

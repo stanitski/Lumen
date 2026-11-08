@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass
+from datetime import date, datetime, tzinfo
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 from lumen.services.web_search import DuckDuckGoWebSearch, WebSearchResult
+from lumen.timezones import kyiv_timezone
 
 if TYPE_CHECKING:
     from lumen.services.telegram_context import TelegramContextService
+    from lumen.storage.nutrition import NutritionStore
 
 
 @dataclass(frozen=True)
@@ -28,17 +32,22 @@ class ContextExecutor:
     """Dispatch read-only context requests; integrations are added independently."""
 
     _WEB_CONTEXT_CHAR_LIMIT = 3000
+    _NUTRITION_CONTEXT_CHAR_LIMIT = 4000
 
     def __init__(
         self,
         telegram_service: "TelegramContextService | None" = None,
         web_search: DuckDuckGoWebSearch | None = None,
         *,
+        nutrition_store: "NutritionStore | None" = None,
+        nutrition_timezone: str | tzinfo | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._logger = logger or logging.getLogger("lumen")
         self._telegram_service = telegram_service
         self._web_search = web_search
+        self._nutrition_store = nutrition_store
+        self._nutrition_timezone = nutrition_timezone or "Europe/Kyiv"
         self._allowed_operations = {
             "telegram": "search",
             "web": "search",
@@ -55,7 +64,9 @@ class ContextExecutor:
                 continue
             source = str(request.get("source", "")).strip()
             operation = str(request.get("operation", "")).strip()
-            if self._allowed_operations.get(source) != operation:
+            if self._allowed_operations.get(source) != operation and not (
+                source == "nutrition" and operation in {"summary", "read"}
+            ):
                 continue
             handler = getattr(self, f"_execute_{source}", None)
             if not callable(handler):
@@ -88,6 +99,37 @@ class ContextExecutor:
     async def _execute_knowledge(self, request: dict[str, object], *, user_id: str, user_text: str, operation: str) -> ContextExecutionResult:
         # TODO: route a contract-requested knowledge lookup through the shared retriever.
         return self._pending("knowledge", operation, user_id, request)
+
+    async def _execute_nutrition(self, request: dict[str, object], *, user_id: str, user_text: str, operation: str) -> ContextExecutionResult:
+        del user_text
+        if self._nutrition_store is None:
+            return ContextExecutionResult("nutrition", operation, "unavailable", "Nutrition journal is not configured.")
+        try:
+            if isinstance(self._nutrition_timezone, tzinfo):
+                tz = self._nutrition_timezone
+            elif self._nutrition_timezone in {"Europe/Kyiv", "Europe/Kiev"}:
+                tz = kyiv_timezone()
+            else:
+                tz = ZoneInfo(self._nutrition_timezone)
+            start_raw = request.get("date_from") or request.get("start_date")
+            end_raw = request.get("date_to") or request.get("end_date")
+            today = datetime.now(tz).date()
+            start = date.fromisoformat(str(start_raw)) if start_raw else today
+            end = date.fromisoformat(str(end_raw)) if end_raw else today
+            if end < start:
+                raise ValueError("end date precedes start date")
+        except (KeyError, ValueError, TypeError):
+            return ContextExecutionResult("nutrition", operation, "unavailable", "Nutrition date range is invalid.")
+        result = self._nutrition_store.read_period(user_id, start, end, tz)
+        context = result.context
+        if result.status == "available" and operation == "summary":
+            context = (
+                f"Nutrition summary for {start.isoformat()} through {end.isoformat()}: "
+                f"{result.meal_count} meals, {result.total_calories} kcal total."
+            )
+        if len(context) > self._NUTRITION_CONTEXT_CHAR_LIMIT:
+            context = context[: self._NUTRITION_CONTEXT_CHAR_LIMIT - 1].rstrip() + "…"
+        return ContextExecutionResult("nutrition", operation, result.status, result.detail, context)
 
     def _pending(
         self,
